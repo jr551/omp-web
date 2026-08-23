@@ -1,10 +1,14 @@
-import { readdir, realpath, stat } from "fs/promises";
+import { mkdir, readdir, realpath, stat } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 
 export interface BrowsableDirectory {
   name: string;
   path: string;
+}
+
+export interface CreatedDirectory extends BrowsableDirectory {
+  parentPath: string;
 }
 
 export function shouldShowWindowsDrivePicker(
@@ -77,6 +81,42 @@ export async function resolveDirectory(directory: string): Promise<string> {
  */
 export function restoreDriveRootSeparator(directory: string): string {
   return /^[a-zA-Z]:$/.test(directory) ? `${directory}\\` : directory;
+}
+
+export async function createChildDirectory(
+  parentDirectory: string,
+  requestedName: string,
+): Promise<CreatedDirectory> {
+  const name = requestedName.trim();
+  if (!name) throw new Error("Folder name is required");
+  if (
+    name === "."
+    || name === ".."
+    || name.includes("/")
+    || name.includes("\\")
+    || name.includes("\0")
+    || path.isAbsolute(name)
+    || path.win32.isAbsolute(name)
+  ) {
+    throw new Error("Folder name must be a single folder name");
+  }
+
+  const parentPath = await resolveDirectory(parentDirectory);
+  const parentStat = await stat(parentPath);
+  if (!parentStat.isDirectory()) {
+    const error = new Error("Parent path is not a directory") as NodeJS.ErrnoException;
+    error.code = "ENOTDIR";
+    throw error;
+  }
+
+  const childPath = path.join(parentPath, name);
+  await mkdir(childPath);
+
+  return {
+    name,
+    parentPath,
+    path: await realpath(childPath),
+  };
 }
 
 export async function listDirectories(directory: string): Promise<BrowsableDirectory[]> {
