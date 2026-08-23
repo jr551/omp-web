@@ -1,6 +1,7 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import type { ProviderCredentialType, ProviderListingInput } from "@/lib/provider-listing";
+import { selectWebOAuthLoginId } from "@/lib/oauth-web-login";
 import { getOmpRuntime } from "@/lib/omp-runtime";
 
 /**
@@ -73,9 +74,5 @@ export async function collectProviderListingInputs(): Promise<ProviderListingInp
 
 /** OAuth login ids keyed by the provider whose credentials they store. */
 export function resolveOAuthLoginId(provider: string): string | undefined {
-  for (const candidate of getOAuthProviders()) {
-    if (!candidate.available) continue;
-    if ((candidate.storeCredentialsAs ?? candidate.id) === provider) return candidate.id;
-  }
-  return undefined;
+  return selectWebOAuthLoginId(provider, getOAuthProviders().filter((candidate) => candidate.available));
 }

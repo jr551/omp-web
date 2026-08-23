@@ -1,5 +1,6 @@
 import type { OAuthAuthInfo, OAuthPrompt } from "@oh-my-pi/pi-ai/oauth";
 import { invalidateModelsCache } from "@/lib/models-cache";
+import { createWebOAuthAuthEvent } from "@/lib/oauth-web-login";
 import { getOmpRuntime, invalidateOmpRuntime } from "@/lib/omp-runtime";
 import { resolveOAuthLoginId } from "@/lib/provider-listing-runtime";
 
@@ -71,6 +72,7 @@ export async function GET(
       const registry = getCallbackRegistry();
       const activeTokens = new Set<string>();
       let pendingManualRequest: { token: string; promise: Promise<string> } | undefined;
+      let deviceAuthorizationPending = false;
 
       const createClientInputRequest = () => {
         const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -136,19 +138,14 @@ export async function GET(
           // auth URL so a user who pastes the redirect completes the login.
           onManualCodeInput: () => getManualInputRequest().promise,
           onAuth: (info: OAuthAuthInfo) => {
-            const request = getManualInputRequest();
-            send(controller, {
-              type: "auth",
-              // `launchUrl` is the truncation-safe loopback redirect when the
-              // flow hosts one; fall back to the full authorization URL.
-              url: info.launchUrl ?? info.url,
-              fullUrl: info.url,
-              instructions: info.instructions ?? null,
-              token: request.token,
-            });
+            const request = loginId === "openai-codex-device" ? undefined : getManualInputRequest();
+            const event = createWebOAuthAuthEvent(loginId, info, request?.token);
+            deviceAuthorizationPending = event.type === "device_code";
+            send(controller, event);
           },
           onProgress: (message: string) => {
-            send(controller, { type: "progress", message });
+            // Keep the device code visible while the SDK polls for approval.
+            if (!deviceAuthorizationPending) send(controller, { type: "progress", message });
           },
           signal: abort.signal,
         });
