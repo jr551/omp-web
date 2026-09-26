@@ -235,7 +235,19 @@ fi
 log "model $winner is green after $attempts_used CI attempt(s)"
 drop_github_changes
 git_id=(-c "user.name=${GIT_AUTHOR_NAME:-opencode-agent[bot]}" -c "user.email=${GIT_AUTHOR_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}")
-title="${PR_TITLE:-$(printf '%s' "$task" | head -n 1 | cut -c1-72)}"
+# First sentence of the task, cut at a word boundary: a PR title, not the prompt.
+derive_title() {
+  local line
+  line="$(printf '%s' "$1" | head -n 1 | sed -E 's/[[:space:]]+/ /g; s/^ //')"
+  line="${line%%. *}"
+  line="${line%.}"
+  if (( ${#line} > 72 )); then
+    line="${line:0:69}"
+    line="${line% *}..."
+  fi
+  printf '%s' "$line"
+}
+title="${PR_TITLE:-$(derive_title "$task")}"
 if [[ -n "$(git status --porcelain)" ]]; then
   git add -A
   git "${git_id[@]}" commit -q -m "$title" -m "Implemented by OpenCode ($winner), verified by .github/scripts/ci.sh." -m "Agent run: $run_id"

@@ -36,7 +36,13 @@ RUN apt-get update \
 # Docker Desktop on macOS and Windows remaps ownership itself and needs neither.
 ARG UID=1000
 ARG GID=1000
-RUN groupadd --gid "${GID}" omp \
+# The oven/bun image already ships a `bun` account at 1000:1000, so free the
+# requested ids before creating `omp` (groupadd/useradd refuse duplicates).
+RUN existing_user="$(getent passwd "${UID}" | cut -d: -f1)" \
+ && if [ -n "$existing_user" ]; then userdel "$existing_user"; fi \
+ && existing_group="$(getent group "${GID}" | cut -d: -f1)" \
+ && if [ -n "$existing_group" ]; then groupdel "$existing_group"; fi \
+ && groupadd --gid "${GID}" omp \
  && useradd --uid "${UID}" --gid "${GID}" --create-home --home-dir /home/omp omp \
  && mkdir -p /home/omp/.omp/agent /workspace \
  && chown -R omp:omp /home/omp /workspace

@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: ""
+      title:
+        description: "PR title (default: first sentence of the task)"
+        required: false
+        type: string
+        default: ""
       branch:
         description: Existing branch to repair in place (empty = new branch + PR)
         required: false
@@ -99,6 +104,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           INPUT_TASK: ${{ inputs.task }}
+          INPUT_TITLE: ${{ inputs.title }}
           INPUT_BRANCH: ${{ inputs.branch }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
@@ -122,6 +128,7 @@ jobs:
                 exit 1
               fi
               printf '%s\n' "$INPUT_TASK" > "$task_file"
+              if [[ -n "$INPUT_TITLE" ]]; then printf 'title=%s\n' "$(printf '%s' "$INPUT_TITLE" | head -n 1 | head -c 200)" >> "$GITHUB_OUTPUT"; fi
               if [[ -n "$INPUT_BRANCH" ]]; then mode="repair"; fi
               ;;
             schedule)
