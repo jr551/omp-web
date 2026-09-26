@@ -23,3 +23,20 @@ export function openExternal(url: string): void {
 
   window.open(url, "_blank", "noopener,noreferrer")
 }
+
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"])
+
+/**
+ * Whether this page is served from the machine the browser runs on. OAuth
+ * loopback URLs (`http://localhost:<port>/launch`) only resolve there; a
+ * browser reaching omp-web remotely needs the provider's full URL instead.
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+  return LOOPBACK_HOSTNAMES.has(hostname) || hostname.endsWith(".localhost")
+}
+
+export function isLoopbackBrowser(): boolean {
+  if (typeof window === "undefined") return true
+  if ((globalThis as { __TAURI__?: unknown }).__TAURI__) return true
+  return isLoopbackHostname(window.location.hostname)
+}

@@ -7,7 +7,7 @@ import { SearchableSelect } from "./SearchableSelect";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
 import type { DiscoveredModel } from "@/lib/model-discovery";
-import { openExternal } from "@/lib/open-external";
+import { isLoopbackBrowser, openExternal } from "@/lib/open-external";
 import {
   serializeHeaderRows,
   setCompatBool,
@@ -118,7 +118,7 @@ interface ApiKeyProvider {
 type OAuthLoginState =
   | { phase: "idle" }
   | { phase: "connecting" }
-  | { phase: "auth"; url: string; instructions: string | null; token: string }
+  | { phase: "auth"; url: string; fullUrl: string; instructions: string | null; token: string }
   | { phase: "device_code"; userCode: string; verificationUri: string; intervalSeconds: number | null; expiresInSeconds: number | null }
   | { phase: "prompt"; message: string; placeholder: string | null; token: string }
   | { phase: "select"; message: string; options: { id: string; label: string }[]; token: string }
@@ -1214,14 +1214,17 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
     es.onmessage = (e) => {
       const data = JSON.parse(e.data) as {
-        type: string; url?: string; instructions?: string | null;
+        type: string; url?: string; fullUrl?: string; instructions?: string | null;
         token?: string; message?: string; placeholder?: string | null;
         userCode?: string; verificationUri?: string; intervalSeconds?: number | null; expiresInSeconds?: number | null;
         options?: { id: string; label: string }[];
       };
       if (data.type === "auth") {
-        setLoginState({ phase: "auth", url: data.url!, instructions: data.instructions ?? null, token: data.token! });
-        openExternal(data.url!);
+        const fullUrl = data.fullUrl ?? data.url!;
+        setLoginState({ phase: "auth", url: data.url!, fullUrl, instructions: data.instructions ?? null, token: data.token! });
+        // The loopback launch URL resolves against the browser's machine, so it
+        // only works when the browser runs on the omp-web host (issue #85).
+        openExternal(isLoopbackBrowser() ? data.url! : fullUrl);
       } else if (data.type === "device_code") {
         setLoginState({
           phase: "device_code",
@@ -1353,10 +1356,18 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
             {loginState.phase === "auth" && (
               <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
                 If the browser window did not open,{" "}
-                <a href={loginState.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
+                <a href={loginState.fullUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
                   click here to open the login page
                 </a>
                 .
+                {loginState.url !== loginState.fullUrl && (
+                  <>
+                    {" "}Local shortcut (omp-web host only):{" "}
+                    <a href={loginState.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
+                      {loginState.url}
+                    </a>
+                  </>
+                )}
               </p>
             )}
             <div style={{ display: "flex", gap: 6 }}>
