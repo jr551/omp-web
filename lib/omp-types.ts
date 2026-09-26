@@ -172,6 +172,8 @@ export interface AgentSessionLike {
     streamingBehavior?: "steer" | "followUp";
     userInitiated?: boolean;
   }): Promise<boolean>;
+  /** omp's auto-title gate; its interactive mode calls it for every submitted message. */
+  maybeStartTitleGeneration?(firstMessage: string): void;
   abort(options?: { reason?: string }): Promise<void>;
   executeBash(command: string, onChunk?: (chunk: string) => void, options?: { excludeFromContext?: boolean }): Promise<{ output: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; fullOutputPath?: string }>;
   abortBash(): void;

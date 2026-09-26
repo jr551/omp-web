@@ -38,7 +38,16 @@ export async function POST(
       return NextResponse.json({ title: null, skipped: true });
     }
 
-    await session.inner.sessionManager.setSessionName(result.title, "auto");
+    // Clicking "Generate title" is an explicit rename: an "auto" write is
+    // ignored once the user has named the session, which reported a title
+    // that was never saved.
+    const written = await session.inner.sessionManager.setSessionName(result.title, "user");
+    if (!written) {
+      return NextResponse.json(
+        { error: "The session was closed while its title was being generated. Please try again." },
+        { status: 409 },
+      );
+    }
     invalidateSessionListCache();
     return NextResponse.json({ title: result.title });
   } catch (error) {

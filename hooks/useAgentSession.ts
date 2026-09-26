@@ -175,6 +175,8 @@ export interface UseAgentSessionOptions {
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
+  /** The server renamed the session (omp's auto-title, /name, "Generate title"). */
+  onSessionRenamed?: (sessionId: string, title: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
@@ -368,7 +370,7 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
+    session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
@@ -1407,6 +1409,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setSubagents((previous) => mergeSubagentSnapshots(previous, [snapshot]));
         break;
       }
+      case "session_renamed": {
+        const title = event.title as string | undefined;
+        const eventSessionId = (event.sessionId as string | undefined) ?? sessionIdRef.current;
+        if (title && eventSessionId && eventSessionId === sessionIdRef.current) onSessionRenamed?.(eventSessionId, title);
+        break;
+      }
       case "queue_update":
         setQueuedMessages({
           steering: [...((event.steering as string[] | undefined) ?? [])],
@@ -1444,7 +1452,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, refreshContextUsage, scheduleEventStreamClose, settleUiStage]);
+  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, scheduleEventStreamClose, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {

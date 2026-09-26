@@ -301,6 +301,7 @@ export class AgentSessionWrapper {
   private extensionBindingError: unknown = null;
   private forceEmptySystemPrompt = false;
   private unsubscribe: (() => void) | null = null;
+  private unsubscribeSessionName: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
@@ -478,6 +479,13 @@ export class AgentSessionWrapper {
         );
       });
     });
+    // Titles land asynchronously (omp's auto-title, /name, "Generate title");
+    // tell open tabs so the sidebar and header follow without a reload.
+    this.unsubscribeSessionName = this.inner.sessionManager.onSessionNameChanged?.(() => {
+      invalidateSessionListCache();
+      const title = this.inner.sessionManager.getSessionName();
+      if (title) this.emit({ type: "session_renamed", title, sessionId: this.inner.sessionId });
+    }) ?? null;
     this.resetIdleTimer();
     notifyRunningChange();
   }
@@ -807,6 +815,9 @@ export class AgentSessionWrapper {
         // A turn the operator asked for means the next continuation is wanted,
         // and supersedes one already scheduled.
         this.goalMode.onUserPrompt();
+        // omp titles a session from its first real message in the TUI and the
+        // CLI, but that call lives in their input handling, not in prompt().
+        if (typeof command.message === "string") this.inner.maybeStartTitleGeneration?.(command.message);
         // Fire and forget — events come via subscribe
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
@@ -1228,6 +1239,7 @@ export class AgentSessionWrapper {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
+    this.unsubscribeSessionName?.();
     this.goalModeController?.dispose();
     this.subagents.dispose();
     this.subagentHistory.clear();

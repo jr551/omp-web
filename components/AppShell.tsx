@@ -719,6 +719,13 @@ export function AppShell() {
     setExplorerRefreshKey((k) => k + 1);
   }, []);
 
+  const handleSessionRenamed = useCallback((sessionId: string, title: string) => {
+    setRefreshKey((key) => key + 1);
+    if (activeSessionIdRef.current !== sessionId) return;
+    setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
+    setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: title } : current);
+  }, []);
+
   const handleSessionForked = useCallback((newSessionId: string) => {
     invalidateWorkspaceRestore();
     setRefreshKey((k) => k + 1);
@@ -1750,6 +1757,7 @@ export function AppShell() {
               onAttentionNeeded={handleAttentionNeeded}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
+              onSessionRenamed={handleSessionRenamed}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
               onBranchDataChange={handleBranchDataChange}
