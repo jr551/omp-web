@@ -9,10 +9,8 @@
 # Environment knobs:
 #   SKIP_INSTALL=1   skip `bun install --frozen-lockfile` (dependencies already installed)
 #   SKIP_BUILD=1     skip `bun run build` (faster inner loop; CI never sets this)
-#   LINT_STRICT=1    make `bun run lint` fatal. Default 0: the tree currently has
-#                    pre-existing React Compiler lint errors
-#                    (react-hooks/preserve-manual-memoization), so lint is reported
-#                    but does not fail the run. Flip the default once lint is clean.
+#   LINT_STRICT=0    report `bun run lint` failures without failing the run
+#                    (default 1: lint is clean and must stay clean).
 #
 # Note: `bun run build` writes .next/. AGENTS.md forbids that during local dev
 # because it breaks a running `bun run dev`; in CI and in throwaway checkouts it
@@ -25,7 +23,7 @@ set -euo pipefail
 repo_root="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
-LINT_STRICT="${LINT_STRICT:-0}"
+LINT_STRICT="${LINT_STRICT:-1}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
