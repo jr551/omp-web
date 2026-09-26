@@ -333,16 +333,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           {imageBlocks.length > 0 && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: content ? 8 : 0 }}>
               {imageBlocks.map((img, i) => {
-                // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
-                // pi-ai on-disk format uses flat {data, mimeType} — handle both
-                const flat = img as unknown as { data?: string; mimeType?: string };
-                const src = img.source
-                  ? img.source.type === "base64"
-                    ? `data:${img.source.media_type};base64,${img.source.data}`
-                    : img.source.url ?? ""
-                  : flat.data
-                    ? `data:${flat.mimeType};base64,${flat.data}`
-                    : "";
+                const src = imageSource(img);
                 return (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
@@ -870,11 +861,12 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
   const resultText = result
     ? result.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n")
     : null;
+  const resultImages = result ? result.content.filter((b): b is ImageContent => b.type === "image") : [];
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
 
   if (isBashTool) {
-    return (
+    const consoleView = (
       <ConsoleOutputPreview
         command={isRecord(block.input) && typeof block.input.command === "string" ? block.input.command : ""}
         output={resultText ?? ""}
@@ -883,6 +875,13 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
         duration={duration}
         local={normalizedToolName.includes("(local)")}
       />
+    );
+    if (resultImages.length === 0) return consoleView;
+    return (
+      <>
+        {consoleView}
+        <PairedResultImages images={resultImages} isError={isError} />
+      </>
     );
   }
 
@@ -986,6 +985,10 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
           isError={false}
         />
       )}
+
+      {/* Image blocks in a tool result render regardless of `expanded`/`resultIsEmpty`:
+          an image-returning tool often has no text output at all. */}
+      <PairedResultImages images={resultImages} isError={isError} />
     </div>
   );
 }
@@ -1640,6 +1643,37 @@ function PairedResult({ text, isEmpty, isError }: {
   );
 }
 
+/** Renders the `ImageContent` blocks of a tool result. Shares `imageSource` with UserMessageView. */
+function PairedResultImages({ images, isError }: { images: ImageContent[]; isError: boolean }) {
+  if (images.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 6,
+        flexWrap: "wrap",
+        padding: "8px 10px",
+        borderTop: `1px solid ${isError ? "rgba(248,113,113,0.3)" : "rgba(34,197,94,0.15)"}`,
+        background: isError ? "rgba(248,113,113,0.04)" : "var(--bg-subtle)",
+      }}
+    >
+      {images.map((img, i) => {
+        const src = imageSource(img);
+        if (!src) return null;
+        return (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            key={i}
+            src={src}
+            alt=""
+            style={{ maxWidth: "100%", maxHeight: 360, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid rgba(34,197,94,0.2)" }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 function CompactionMessageView({ message }: { message: CustomMessage }) {
   const { t } = useI18n();
   const summary = getMessageText(message.content);
@@ -1899,6 +1933,11 @@ function getMessageImages(content: CustomMessage["content"] | UserMessage["conte
   return content.filter((b): b is ImageContent => b.type === "image");
 }
 
+/**
+ * Resolves an image block to an `<img src>`.
+ * lib/types.ts `ImageContent` uses `{source:{type,data,media_type,url}}`;
+ * the pi-ai on-disk format uses flat `{data, mimeType}` — both are handled.
+ */
 function imageSource(img: ImageContent): string {
   const flat = img as unknown as { data?: string; mimeType?: string };
   if (img.source) {

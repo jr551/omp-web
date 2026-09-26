@@ -224,3 +224,106 @@ test("renders thinking markdown directly without a collapsible card", () => {
   assert.match(html, /<strong>Direct thought<\/strong>/);
   assert.doesNotMatch(html, /aria-expanded/);
 });
+
+const PNG_B64 = "iVBORw0KGgo=";
+
+function renderToolResult(toolName, content, isError = false) {
+  return renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(MessageView, {
+        message: {
+          role: "assistant",
+          provider: "openai",
+          model: "gpt-test",
+          content: [{ type: "toolCall", toolCallId: "img-1", toolName, input: { prompt: "a cat" } }],
+        },
+        toolResults: new Map([
+          ["img-1", { role: "toolResult", toolCallId: "img-1", toolName, content, isError }],
+        ]),
+      }),
+    ),
+  );
+}
+
+test("renders a base64 image block returned by a tool as a data URI", () => {
+  const html = renderToolResult("generate_image", [
+    { type: "text", text: "saved" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_B64 } },
+  ]);
+
+  assert.match(html, new RegExp(`src="data:image/png;base64,${PNG_B64}"`));
+  // The text payload stays behind the collapsed disclosure; the image does not.
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /saved/);
+});
+
+test("renders a url image block returned by a tool", () => {
+  const html = renderToolResult("generate_image", [
+    { type: "image", source: { type: "url", url: "https://example.test/pic.webp" } },
+  ]);
+
+  assert.match(html, /src="https:\/\/example\.test\/pic\.webp"/);
+});
+
+test("renders the flat on-disk image shape returned by a tool", () => {
+  const html = renderToolResult("generate_image", [
+    { type: "image", data: PNG_B64, mimeType: "image/jpeg" },
+  ]);
+
+  assert.match(html, new RegExp(`src="data:image/jpeg;base64,${PNG_B64}"`));
+});
+
+test("renders a tool result image even when its text output is empty", () => {
+  const html = renderToolResult("generate_image", [
+    { type: "text", text: "(no output)" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_B64 } },
+  ]);
+
+  assert.match(html, new RegExp(`src="data:image/png;base64,${PNG_B64}"`));
+});
+
+test("renders a tool result image on the error path", () => {
+  const html = renderToolResult(
+    "generate_image",
+    [
+      { type: "text", text: "upstream refused" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_B64 } },
+    ],
+    true,
+  );
+
+  assert.match(html, new RegExp(`src="data:image/png;base64,${PNG_B64}"`));
+  assert.match(html, /upstream refused/);
+});
+
+test("does not drop image blocks from a bash tool result", () => {
+  const html = renderToolResult("bash", [
+    { type: "text", text: "rendered chart" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_B64 } },
+  ]);
+
+  assert.match(html, /class="shell-output-preview"/);
+  assert.match(html, new RegExp(`src="data:image/png;base64,${PNG_B64}"`));
+  assert.match(html, /rendered chart/);
+});
+
+test("leaves text-only tool results free of image elements", () => {
+  const html = renderToolResult("read", [{ type: "text", text: "plain text output" }]);
+
+  assert.doesNotMatch(html, /<img/);
+});
+
+test("renders user message images through the shared image source helper", () => {
+  const html = renderMessage({
+    role: "user",
+    content: [
+      { type: "text", text: "look at this" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_B64 } },
+    ],
+  });
+
+  assert.match(html, new RegExp(`src="data:image/png;base64,${PNG_B64}"`));
+  assert.match(html, /look at this/);
+});
