@@ -194,34 +194,50 @@ export function invalidateSessionPathCache(sessionId: string): void {
   }
 }
 
+/** omp 18 writes a fixed-size `title` slot line before the `session` header. */
+const TITLE_SLOT_ENTRY_TYPE = "title";
+
+/** A leading session-file line: the header, `"skip"` for the title slot or a blank line, null otherwise. */
+function parseLeadingLine(line: string): SessionHeader | "skip" | null {
+  if (!line) return "skip";
+  let entry: { type?: unknown } | null;
+  try {
+    entry = JSON.parse(line) as { type?: unknown } | null;
+  } catch {
+    return null;
+  }
+  if (entry?.type === TITLE_SLOT_ENTRY_TYPE) return "skip";
+  return entry?.type === "session" ? entry as SessionHeader : null;
+}
+
 export function readSessionHeader(filePath: string): SessionHeader | null {
   const fd = openSync(filePath, "r");
   try {
-    const chunks: Buffer[] = [];
+    // The header is the first entry that is not the title slot, so it is not
+    // necessarily line 1. Anything else before it means a malformed file.
     const maxHeaderBytes = 64 * 1024;
     let position = 0;
-    let foundNewline = false;
-
-    while (position < maxHeaderBytes && !foundNewline) {
+    let pending = Buffer.alloc(0);
+    while (position < maxHeaderBytes) {
       const buffer = Buffer.allocUnsafe(Math.min(4096, maxHeaderBytes - position));
       const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
       if (bytesRead === 0) break;
-      const data = buffer.subarray(0, bytesRead);
-      const newlineIndex = data.indexOf(0x0a);
-      chunks.push(newlineIndex === -1 ? data : data.subarray(0, newlineIndex));
       position += bytesRead;
-      foundNewline = newlineIndex !== -1;
+      pending = Buffer.concat([pending, buffer.subarray(0, bytesRead)]);
+      let newlineIndex = pending.indexOf(0x0a);
+      while (newlineIndex !== -1) {
+        const line = pending.subarray(0, newlineIndex).toString("utf8").trim();
+        pending = pending.subarray(newlineIndex + 1);
+        newlineIndex = pending.indexOf(0x0a);
+        const parsed = parseLeadingLine(line);
+        if (parsed !== "skip") return parsed;
+      }
     }
-
-    if (!foundNewline && position >= maxHeaderBytes) return null;
-    const firstLine = Buffer.concat(chunks).toString("utf8").trimEnd();
-    if (!firstLine) return null;
-    try {
-      const header = JSON.parse(firstLine) as SessionHeader;
-      return header.type === "session" ? header : null;
-    } catch {
-      return null;
-    }
+    // A header line longer than the bound is not trusted; a final line
+    // without a newline is still a complete entry at end of file.
+    if (position >= maxHeaderBytes) return null;
+    const parsed = parseLeadingLine(pending.toString("utf8").trim());
+    return parsed === "skip" ? null : parsed;
   } finally {
     closeSync(fd);
   }
