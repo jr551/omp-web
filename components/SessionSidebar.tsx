@@ -449,9 +449,12 @@ function PiWebTitle() {
 export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
-  const sessionsForDisplay = optimisticSession && !allSessions.some((session) => session.id === optimisticSession.id)
-    ? [optimisticSession, ...allSessions]
-    : allSessions;
+  const sessionsForDisplay = useMemo(
+    () => optimisticSession && !allSessions.some((session) => session.id === optimisticSession.id)
+      ? [optimisticSession, ...allSessions]
+      : allSessions,
+    [allSessions, optimisticSession],
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);

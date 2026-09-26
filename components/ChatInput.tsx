@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages } from "@/hooks/useAgentSession";
 import type { ModelRoleAssignment, SkillsResponse } from "@/lib/api-types";
 import type { ContextUsage, SlashCommandInfo } from "@/lib/omp-types";
@@ -160,6 +160,8 @@ const BUILTIN_SLASH_COMMANDS: LocalBuiltinSlashCommand[] = [
   { name: "copy", descriptionKey: "chat.commandCopy", source: "builtin" },
   { name: "plan", descriptionKey: "chat.commandPlan", source: "builtin" },
 ];
+
+const NO_SKILL_DORMANCY: Record<string, boolean> = {};
 
 const SLASH_SOURCES: SlashCommandSource[] = ["builtin", "extension", "custom", "mcp_prompt", "prompt", "file", "skill"];
 
@@ -487,7 +489,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   } | null>(null);
   const skillDormancy = cwd && skillDormancyState?.cwd === cwd
     ? skillDormancyState.values
-    : {};
+    : NO_SKILL_DORMANCY;
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -517,6 +519,109 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
 
+  const dismissImageAttachError = useCallback(() => {
+    if (imageAttachErrorTimerRef.current) {
+      clearTimeout(imageAttachErrorTimerRef.current);
+      imageAttachErrorTimerRef.current = null;
+    }
+    setImageAttachError(null);
+  }, []);
+
+  useEffect(() => () => {
+    if (imageAttachErrorTimerRef.current) clearTimeout(imageAttachErrorTimerRef.current);
+  }, []);
+
+  const processImageFiles = useCallback((files: File[]): Promise<void> => {
+    const work = (async () => {
+      const remaining = Math.max(
+        0,
+        MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
+      );
+      const validFiles: Array<{ file: File; mimeType: string }> = [];
+      const tooLarge: string[] = [];
+      const unsupported: string[] = [];
+      for (const file of files) {
+        const mimeType = resolveImageMimeType(file);
+        if (!mimeType) {
+          unsupported.push(file.name);
+        } else if (file.size > MAX_ATTACHED_IMAGE_BYTES) {
+          tooLarge.push(file.name);
+        } else {
+          validFiles.push({ file, mimeType });
+        }
+      }
+      const imageFiles = validFiles.slice(0, remaining);
+      const truncatedCount = validFiles.length - imageFiles.length;
+
+      // Rejected attachments used to be dropped without any feedback.
+      dismissImageAttachError();
+      const errorMessage = buildImageAttachErrorMessage(t, tooLarge, unsupported, truncatedCount);
+      if (errorMessage) {
+        setImageAttachError(errorMessage);
+        imageAttachErrorTimerRef.current = setTimeout(() => setImageAttachError(null), 8000);
+      }
+
+      if (!imageFiles.length) return;
+      pendingImageCountRef.current += imageFiles.length;
+      try {
+        const newImages = await Promise.all(
+          imageFiles.map(
+            ({ file, mimeType }) =>
+              new Promise<AttachedImage>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const result = reader.result as string;
+                  // result is "data:<mime>;base64,<data>"
+                  const base64 = result.split(",")[1];
+                  resolve({ data: base64, mimeType, previewUrl: URL.createObjectURL(file) });
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              })
+          )
+        );
+        setAttachedImages((prev) => {
+          const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
+          newImages.slice(accepted.length).forEach(revokeImagePreview);
+          const next = [...prev, ...accepted];
+          attachedImagesRef.current = next;
+          return next;
+        });
+      } finally {
+        pendingImageCountRef.current -= imageFiles.length;
+      }
+    })();
+
+    // Reading an attachment is asynchronous, so Enter pressed right after
+    // picking one used to send a text-only prompt and drop the image without
+    // any error. Senders await this handle instead.
+    pendingImagesRef.current = work;
+    void work.catch(() => {}).finally(() => {
+      if (pendingImagesRef.current === work) pendingImagesRef.current = null;
+    });
+    return work;
+  }, [t, dismissImageAttachError]);
+
+  /**
+   * Resolves once no attachment is still being read, so a send never races one.
+   * Resolves false when another send is already waiting, so a repeated Enter
+   * cannot dispatch the same message twice.
+   */
+  const waitForPendingImages = useCallback(async (): Promise<boolean> => {
+    if (!pendingImagesRef.current) return true;
+    if (waitingForImagesRef.current) return false;
+    waitingForImagesRef.current = true;
+    try {
+      while (pendingImagesRef.current) {
+        await pendingImagesRef.current.catch(() => {});
+      }
+    } finally {
+      waitingForImagesRef.current = false;
+    }
+    return true;
+  }, []);
+
+  // Declared after processImageFiles, which addImages() calls.
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
       const ta = textareaRef.current;
@@ -698,108 +803,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
   }));
 
-  const dismissImageAttachError = useCallback(() => {
-    if (imageAttachErrorTimerRef.current) {
-      clearTimeout(imageAttachErrorTimerRef.current);
-      imageAttachErrorTimerRef.current = null;
-    }
-    setImageAttachError(null);
-  }, []);
-
-  useEffect(() => () => {
-    if (imageAttachErrorTimerRef.current) clearTimeout(imageAttachErrorTimerRef.current);
-  }, []);
-
-  const processImageFiles = useCallback((files: File[]): Promise<void> => {
-    const work = (async () => {
-      const remaining = Math.max(
-        0,
-        MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
-      );
-      const validFiles: Array<{ file: File; mimeType: string }> = [];
-      const tooLarge: string[] = [];
-      const unsupported: string[] = [];
-      for (const file of files) {
-        const mimeType = resolveImageMimeType(file);
-        if (!mimeType) {
-          unsupported.push(file.name);
-        } else if (file.size > MAX_ATTACHED_IMAGE_BYTES) {
-          tooLarge.push(file.name);
-        } else {
-          validFiles.push({ file, mimeType });
-        }
-      }
-      const imageFiles = validFiles.slice(0, remaining);
-      const truncatedCount = validFiles.length - imageFiles.length;
-
-      // Rejected attachments used to be dropped without any feedback.
-      dismissImageAttachError();
-      const errorMessage = buildImageAttachErrorMessage(t, tooLarge, unsupported, truncatedCount);
-      if (errorMessage) {
-        setImageAttachError(errorMessage);
-        imageAttachErrorTimerRef.current = setTimeout(() => setImageAttachError(null), 8000);
-      }
-
-      if (!imageFiles.length) return;
-      pendingImageCountRef.current += imageFiles.length;
-      try {
-        const newImages = await Promise.all(
-          imageFiles.map(
-            ({ file, mimeType }) =>
-              new Promise<AttachedImage>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => {
-                  const result = reader.result as string;
-                  // result is "data:<mime>;base64,<data>"
-                  const base64 = result.split(",")[1];
-                  resolve({ data: base64, mimeType, previewUrl: URL.createObjectURL(file) });
-                };
-                reader.onerror = reject;
-                reader.readAsDataURL(file);
-              })
-          )
-        );
-        setAttachedImages((prev) => {
-          const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
-          newImages.slice(accepted.length).forEach(revokeImagePreview);
-          const next = [...prev, ...accepted];
-          attachedImagesRef.current = next;
-          return next;
-        });
-      } finally {
-        pendingImageCountRef.current -= imageFiles.length;
-      }
-    })();
-
-    // Reading an attachment is asynchronous, so Enter pressed right after
-    // picking one used to send a text-only prompt and drop the image without
-    // any error. Senders await this handle instead.
-    pendingImagesRef.current = work;
-    void work.catch(() => {}).finally(() => {
-      if (pendingImagesRef.current === work) pendingImagesRef.current = null;
-    });
-    return work;
-  }, [t, dismissImageAttachError]);
-
-  /**
-   * Resolves once no attachment is still being read, so a send never races one.
-   * Resolves false when another send is already waiting, so a repeated Enter
-   * cannot dispatch the same message twice.
-   */
-  const waitForPendingImages = useCallback(async (): Promise<boolean> => {
-    if (!pendingImagesRef.current) return true;
-    if (waitingForImagesRef.current) return false;
-    waitingForImagesRef.current = true;
-    try {
-      while (pendingImagesRef.current) {
-        await pendingImagesRef.current.catch(() => {});
-      }
-    } finally {
-      waitingForImagesRef.current = false;
-    }
-    return true;
-  }, []);
-
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
       const next = [...prev];
@@ -906,7 +909,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? value.slice(1).toLowerCase()
     : null;
 
-  const filteredSlashCommands = (() => {
+  // Memoized so the palette arrays keep their identity between renders; the
+  // key handler and the navigation helpers below depend on them.
+  const filteredSlashCommands = useMemo(() => {
     if (slashQuery === null) return [];
     const commands = [...(isStreaming ? [] : BUILTIN_SLASH_COMMANDS), ...(slashCommands ?? [])];
     const seenNames = new Set<string>();
@@ -928,12 +933,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         seenNames.add(normalizedName);
         return true;
       });
-  })();
+  }, [isStreaming, slashCommands, slashQuery, t]);
 
   const {
     commands: displayedSlashCommands,
     groups: groupedSlashCommands,
-  } = buildSlashCommandLayout(filteredSlashCommands, skillDormancy);
+  } = useMemo(
+    () => buildSlashCommandLayout(filteredSlashCommands, skillDormancy),
+    [filteredSlashCommands, skillDormancy],
+  );
 
   const slashCommandCountLabel = filteredSlashCommands.length === 1
     ? t(slashQuery ? "chat.match" : "chat.command")

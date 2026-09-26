@@ -371,7 +371,7 @@ type SlashCommandsResponse = {
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionRenamed,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
@@ -891,7 +891,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (request.title) document.title = request.title;
         break;
       case "set_editor_text":
-        opts.chatInputRef?.current?.insertText(request.text);
+        chatInputRef?.current?.insertText(request.text);
         break;
       case "custom":
         setExtensionCustomUi((current) => {
@@ -900,7 +900,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
     }
-  }, [addNotice, onAttentionNeeded, opts.chatInputRef]);
+  }, [addNotice, onAttentionNeeded, chatInputRef]);
 
   const settleUiStage = useCallback(() => {
     const wasRunning = agentRunningRef.current;
@@ -1558,7 +1558,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // any attached images) into the input instead of losing it. Mirrors the
       // shell-command recovery in executeBash; restoreSubmission avoids
       // clobbering anything typed since.
-      opts.chatInputRef?.current?.restoreSubmission?.(
+      chatInputRef?.current?.restoreSubmission?.(
         message,
         images?.map(({ data, mimeType }) => ({ data, mimeType })),
         session?.id ?? sentSessionId ?? undefined,
@@ -1568,7 +1568,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, chatInputRef]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1590,13 +1590,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to execute shell command:", e);
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      opts.chatInputRef?.current?.insertIfEmpty(inputText);
+      chatInputRef?.current?.insertIfEmpty(inputText);
     } finally {
       bashRunningRef.current = false;
       setPendingBash(null);
       setBashRunning(false);
     }
-  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session]);
+  }, [addNotice, ensureNewSession, loadSession, chatInputRef, promoteNewSession, session]);
   executeBashRef.current = executeBash;
 
   const handleAbort = useCallback(async () => {
@@ -2080,13 +2080,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setQueuedMessages({ steering: [], followUp: [] });
       const texts = [...(result?.steering ?? []), ...(result?.followUp ?? [])];
       if (texts.length > 0) {
-        opts.chatInputRef?.current?.prependText(texts.join("\n\n"));
+        chatInputRef?.current?.prependText(texts.join("\n\n"));
       }
     } catch (e) {
       console.error("Failed to recall queued messages:", e);
       addNotice({ type: "error", message: "Failed to recall queued messages" });
     }
-  }, [opts.chatInputRef, addNotice]);
+  }, [chatInputRef, addNotice]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     setThinkingLevel(level);
