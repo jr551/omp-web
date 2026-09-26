@@ -75,6 +75,10 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
   const restoredRef = useRef(false);
   const [width, setWidth] = useState(defaultWidth);
   const [isResizing, setIsResizing] = useState(false);
+  // getMaxWidth() reads the window, which the server render cannot; report the
+  // static maximum until mount so aria-valuemax hydrates without a mismatch.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   const effectiveMaxWidth = useCallback(
     () => Math.min(maxWidth, Math.max(minWidth, getMaxWidth())),
@@ -264,7 +268,7 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
     separatorProps: {
       "aria-label": ariaLabel,
       "aria-orientation": "vertical" as const,
-      "aria-valuemax": effectiveMaxWidth(),
+      "aria-valuemax": mounted ? effectiveMaxWidth() : maxWidth,
       "aria-valuemin": minWidth,
       "aria-valuenow": width,
       "aria-valuetext": `${width} px`,
