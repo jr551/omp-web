@@ -5,6 +5,7 @@ import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages } fro
 import type { ModelRoleAssignment, SkillsResponse } from "@/lib/api-types";
 import type { ContextUsage, SlashCommandInfo } from "@/lib/omp-types";
 import type { TextContent, UserMessage } from "@/lib/types";
+import type { TranslationParams } from "@/lib/i18n/types";
 import {
   clearDraft,
   getDraft,
@@ -247,6 +248,67 @@ function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined): Atta
     .map(draftImageToAttachedImage);
 }
 
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heif",
+};
+
+/**
+ * The image media type to attach `file` as, or null when it is not an image.
+ *
+ * `File.type` is authoritative when present, but several pickers and clipboard
+ * sources hand over an image with an empty type; the extension is then the only
+ * signal, and without it the image is silently rejected.
+ */
+export function resolveImageMimeType(file: { name: string; type: string }): string | null {
+  if (file.type.startsWith("image/")) return file.type;
+  if (file.type) return null;
+  const extension = file.name.includes(".") ? file.name.split(".").pop()?.toLowerCase() ?? "" : "";
+  return IMAGE_MIME_BY_EXTENSION[extension] ?? null;
+}
+
+const MAX_IMAGE_ATTACH_ERROR_NAMES = 3;
+
+function formatSkippedNames(names: string[]): string {
+  if (names.length <= MAX_IMAGE_ATTACH_ERROR_NAMES) return names.join(", ");
+  const shown = names.slice(0, MAX_IMAGE_ATTACH_ERROR_NAMES).join(", ");
+  return `${shown} +${names.length - MAX_IMAGE_ATTACH_ERROR_NAMES}`;
+}
+
+/** The user-facing message for attachments processImageFiles rejected (too large, not an image, over the per-message cap). */
+export function buildImageAttachErrorMessage(
+  t: (key: string, params?: TranslationParams) => string,
+  tooLarge: string[],
+  unsupported: string[],
+  truncatedCount: number,
+): string | null {
+  const parts: string[] = [];
+  if (tooLarge.length) {
+    parts.push(t("chat.imageAttachTooLarge", {
+      count: tooLarge.length,
+      maxMB: MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024),
+      names: formatSkippedNames(tooLarge),
+    }));
+  }
+  if (unsupported.length) {
+    parts.push(t("chat.imageAttachUnsupported", {
+      count: unsupported.length,
+      names: formatSkippedNames(unsupported),
+    }));
+  }
+  if (truncatedCount > 0) {
+    parts.push(t("chat.imageAttachLimit", { max: MAX_ATTACHED_IMAGES, count: truncatedCount }));
+  }
+  return parts.length ? parts.join(" ") : null;
+}
+
 export function canRestoreUserMessage(
   value: string,
   attachedImageCount: number,
@@ -447,6 +509,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const pendingImageCountRef = useRef(0);
+  const pendingImagesRef = useRef<Promise<void> | null>(null);
+  const waitingForImagesRef = useRef(false);
+  const [imageAttachError, setImageAttachError] = useState<string | null>(null);
+  const imageAttachErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
 
@@ -631,43 +697,106 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
   }));
 
-  const processImageFiles = useCallback(async (files: File[]) => {
-    const remaining = Math.max(
-      0,
-      MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
-    );
-    const imageFiles = files
-      .filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES)
-      .slice(0, remaining);
-    if (!imageFiles.length) return;
-    pendingImageCountRef.current += imageFiles.length;
-    try {
-      const newImages = await Promise.all(
-        imageFiles.map(
-          (file) =>
-            new Promise<AttachedImage>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const result = reader.result as string;
-                // result is "data:<mime>;base64,<data>"
-                const base64 = result.split(",")[1];
-                resolve({ data: base64, mimeType: file.type, previewUrl: URL.createObjectURL(file) });
-              };
-              reader.onerror = reject;
-              reader.readAsDataURL(file);
-            })
-        )
-      );
-      setAttachedImages((prev) => {
-        const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
-        newImages.slice(accepted.length).forEach(revokeImagePreview);
-        const next = [...prev, ...accepted];
-        attachedImagesRef.current = next;
-        return next;
-      });
-    } finally {
-      pendingImageCountRef.current -= imageFiles.length;
+  const dismissImageAttachError = useCallback(() => {
+    if (imageAttachErrorTimerRef.current) {
+      clearTimeout(imageAttachErrorTimerRef.current);
+      imageAttachErrorTimerRef.current = null;
     }
+    setImageAttachError(null);
+  }, []);
+
+  useEffect(() => () => {
+    if (imageAttachErrorTimerRef.current) clearTimeout(imageAttachErrorTimerRef.current);
+  }, []);
+
+  const processImageFiles = useCallback((files: File[]): Promise<void> => {
+    const work = (async () => {
+      const remaining = Math.max(
+        0,
+        MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
+      );
+      const validFiles: Array<{ file: File; mimeType: string }> = [];
+      const tooLarge: string[] = [];
+      const unsupported: string[] = [];
+      for (const file of files) {
+        const mimeType = resolveImageMimeType(file);
+        if (!mimeType) {
+          unsupported.push(file.name);
+        } else if (file.size > MAX_ATTACHED_IMAGE_BYTES) {
+          tooLarge.push(file.name);
+        } else {
+          validFiles.push({ file, mimeType });
+        }
+      }
+      const imageFiles = validFiles.slice(0, remaining);
+      const truncatedCount = validFiles.length - imageFiles.length;
+
+      // Rejected attachments used to be dropped without any feedback.
+      dismissImageAttachError();
+      const errorMessage = buildImageAttachErrorMessage(t, tooLarge, unsupported, truncatedCount);
+      if (errorMessage) {
+        setImageAttachError(errorMessage);
+        imageAttachErrorTimerRef.current = setTimeout(() => setImageAttachError(null), 8000);
+      }
+
+      if (!imageFiles.length) return;
+      pendingImageCountRef.current += imageFiles.length;
+      try {
+        const newImages = await Promise.all(
+          imageFiles.map(
+            ({ file, mimeType }) =>
+              new Promise<AttachedImage>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const result = reader.result as string;
+                  // result is "data:<mime>;base64,<data>"
+                  const base64 = result.split(",")[1];
+                  resolve({ data: base64, mimeType, previewUrl: URL.createObjectURL(file) });
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              })
+          )
+        );
+        setAttachedImages((prev) => {
+          const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
+          newImages.slice(accepted.length).forEach(revokeImagePreview);
+          const next = [...prev, ...accepted];
+          attachedImagesRef.current = next;
+          return next;
+        });
+      } finally {
+        pendingImageCountRef.current -= imageFiles.length;
+      }
+    })();
+
+    // Reading an attachment is asynchronous, so Enter pressed right after
+    // picking one used to send a text-only prompt and drop the image without
+    // any error. Senders await this handle instead.
+    pendingImagesRef.current = work;
+    void work.catch(() => {}).finally(() => {
+      if (pendingImagesRef.current === work) pendingImagesRef.current = null;
+    });
+    return work;
+  }, [t, dismissImageAttachError]);
+
+  /**
+   * Resolves once no attachment is still being read, so a send never races one.
+   * Resolves false when another send is already waiting, so a repeated Enter
+   * cannot dispatch the same message twice.
+   */
+  const waitForPendingImages = useCallback(async (): Promise<boolean> => {
+    if (!pendingImagesRef.current) return true;
+    if (waitingForImagesRef.current) return false;
+    waitingForImagesRef.current = true;
+    try {
+      while (pendingImagesRef.current) {
+        await pendingImagesRef.current.catch(() => {});
+      }
+    } finally {
+      waitingForImagesRef.current = false;
+    }
+    return true;
   }, []);
 
   const removeImage = useCallback((index: number) => {
@@ -686,7 +815,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       prev.forEach(revokeImagePreview);
       return [];
     });
-  }, []);
+    dismissImageAttachError();
+  }, [dismissImageAttachError]);
 
   const clearInput = useCallback(() => {
     valueRef.current = "";
@@ -749,11 +879,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const handleSend = useCallback(async () => {
-    const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
     if (isStreaming) return;
+    // An attachment picked moments ago may still be decoding; sending now would
+    // drop it silently. Wait for it, then read the settled composer state.
+    if (!(await waitForPendingImages())) return;
+    const msg = valueRef.current.trim();
+    const images = attachedImagesRef.current;
+    if (!msg && !images.length) return;
     onAudioUnlock?.();
-    if (!attachedImages.length && msg.startsWith("/") && onBuiltinCommand) {
+    if (!images.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
         if (!result.error) {
@@ -764,8 +898,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
     }
     clearInput();
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
-  }, [value, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+    onSend(msg, images.length ? images : undefined);
+  }, [isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, waitForPendingImages]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -995,24 +1129,30 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
-  const sendQueued = useCallback((mode: "steer" | "followup") => {
-    const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
-    if (attachedImages.length) return;
+  const sendQueued = useCallback(async (mode: "steer" | "followup") => {
+    // Same race as handleSend: a still-decoding attachment must not turn this
+    // into a text-only send.
+    if (!(await waitForPendingImages())) return;
+    const msg = valueRef.current.trim();
+    const images = attachedImagesRef.current;
+    if (!msg && !images.length) return;
+    // Queued (steer/follow-up) messages cannot carry images; the composer keeps
+    // them until the turn ends rather than dropping them.
+    if (images.length) return;
     onAudioUnlock?.();
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
       clearInput();
-      onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
+      onPromptWithStreamingBehavior(msg, streamingBehavior);
       return;
     }
     clearInput();
     if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined);
+      onSteer(msg);
     } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
+      onFollowUp(msg);
     }
-  }, [value, attachedImages, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock]);
+  }, [onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, waitForPendingImages]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;
@@ -1190,10 +1330,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
-    const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
+    // Classify on the resolved media type, not the raw one: a clipboard image
+    // can arrive as a file item with an empty `type`.
+    const files = items
+      .filter((item) => item.kind === "file" || item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => f !== null && resolveImageMimeType(f) !== null);
+    if (!files.length) return;
     e.preventDefault();
-    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
     processImageFiles(files);
   }, [processImageFiles]);
 
@@ -1478,6 +1622,46 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             }}
           >
             {compactError}
+          </div>
+        )}
+        {imageAttachError && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 8,
+              padding: "7px 10px",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              background: "rgba(239,68,68,0.07)",
+              border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 6,
+              color: "#ef4444",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              lineHeight: 1.5,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+            }}
+          >
+            <span style={{ flex: 1 }}>{imageAttachError}</span>
+            <button
+              type="button"
+              onClick={dismissImageAttachError}
+              aria-label={t("chat.close")}
+              title={t("chat.close")}
+              style={{
+                flexShrink: 0,
+                width: 16, height: 16, borderRadius: "50%",
+                background: "transparent", border: "none",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", padding: 0, color: "#ef4444",
+              }}
+            >
+              <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+              </svg>
+            </button>
           </div>
         )}
         {/* Image previews */}

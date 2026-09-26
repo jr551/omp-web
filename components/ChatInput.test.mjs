@@ -8,9 +8,13 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, getUserMessageText, getUserMessageDraftImages } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, getUserMessageText, getUserMessageDraftImages, buildImageAttachErrorMessage, resolveImageMimeType } = await jiti.import("./ChatInput.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { MAX_ATTACHED_IMAGES } = await jiti.import("../lib/image-attachments.ts");
+const { translateMessage } = await jiti.import("../lib/i18n/format.ts");
+const { enLocale } = await jiti.import("../lib/i18n/messages/en.ts");
+const { zhCNLocale } = await jiti.import("../lib/i18n/messages/zh-CN.ts");
 
 test("renders the upstream model error", () => {
   const html = renderToStaticMarkup(
@@ -283,4 +287,53 @@ test("keeps the context indicator visible before usage is available", () => {
   assert.match(html, /role="status"/);
   assert.match(html, /data-context-available="false"/);
   assert.match(html, /\? \/ \?/);
+});
+
+function t(locale) {
+  const messages = { en: enLocale.messages, "zh-CN": zhCNLocale.messages };
+  return (key, params) => translateMessage(locale, key, messages, params);
+}
+
+test("does not report an image attachment error when nothing was rejected", () => {
+  assert.equal(buildImageAttachErrorMessage(t("en"), [], [], 0), null);
+});
+
+test("reports oversized images instead of silently dropping them", () => {
+  const message = buildImageAttachErrorMessage(t("en"), ["photo.jpg"], [], 0);
+  assert.match(message, /Skipped 1 image\(s\) over 10MB: photo\.jpg/);
+});
+
+test("reports unsupported file types and the per-message image cap", () => {
+  const message = buildImageAttachErrorMessage(t("en"), [], ["notes.txt"], 2);
+  assert.match(message, /Skipped 1 unsupported file\(s\): notes\.txt/);
+  assert.match(message, new RegExp(`Only ${MAX_ATTACHED_IMAGES} images allowed per message; skipped 2 extra image\\(s\\)`));
+});
+
+test("combines every rejection reason into one message", () => {
+  const message = buildImageAttachErrorMessage(t("en"), ["a.jpg", "b.jpg"], ["c.txt"], 1);
+  assert.match(message, /Skipped 2 image\(s\) over 10MB: a\.jpg, b\.jpg/);
+  assert.match(message, /Skipped 1 unsupported file\(s\): c\.txt/);
+  assert.match(message, /skipped 1 extra image\(s\)/);
+});
+
+test("truncates a long list of rejected file names", () => {
+  const message = buildImageAttachErrorMessage(t("en"), ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"], [], 0);
+  assert.match(message, /a\.jpg, b\.jpg, c\.jpg \+2/);
+});
+
+test("translates the image attachment rejection message into zh-CN", () => {
+  const message = buildImageAttachErrorMessage(t("zh-CN"), ["photo.jpg"], [], 0);
+  assert.match(message, /已跳过 1 张超过 10MB 的图片：photo\.jpg/);
+});
+
+test("classifies attachments as images even when the picker reports no media type", () => {
+  // `File.type` wins when present.
+  assert.equal(resolveImageMimeType({ name: "shot.png", type: "image/png" }), "image/png");
+  assert.equal(resolveImageMimeType({ name: "notes.txt", type: "text/plain" }), null);
+  // Empty type: the extension is the only signal.
+  assert.equal(resolveImageMimeType({ name: "IMG_0421.JPG", type: "" }), "image/jpeg");
+  assert.equal(resolveImageMimeType({ name: "scan.heic", type: "" }), "image/heic");
+  assert.equal(resolveImageMimeType({ name: "archive.zip", type: "" }), null);
+  assert.equal(resolveImageMimeType({ name: "README", type: "" }), null);
+  assert.equal(resolveImageMimeType({ name: "png", type: "" }), null);
 });
