@@ -210,6 +210,19 @@ function parseLeadingLine(line: string): SessionHeader | "skip" | null {
   return entry?.type === "session" ? entry as SessionHeader : null;
 }
 
+/**
+ * Index of the `session` header among a session file's lines (skipping omp's
+ * title slot and blank lines), or -1 when the file does not start with one.
+ */
+export function findSessionHeaderLineIndex(lines: readonly string[]): number {
+  for (let index = 0; index < lines.length; index += 1) {
+    const parsed = parseLeadingLine(lines[index].trim());
+    if (parsed === "skip") continue;
+    return parsed ? index : -1;
+  }
+  return -1;
+}
+
 export function readSessionHeader(filePath: string): SessionHeader | null {
   const fd = openSync(filePath, "r");
   try {

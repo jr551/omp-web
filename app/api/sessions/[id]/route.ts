@@ -10,6 +10,7 @@ import {
   buildSessionContext,
   getHistoricalContextUsage,
   readSessionHeader,
+  findSessionHeaderLineIndex,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
 import { setSessionArchived } from "@/lib/session-archive";
@@ -166,7 +167,10 @@ export async function DELETE(
         try {
           const content = readFileSync(childPath, "utf8");
           const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
+          // omp writes a title slot before the header, so it is not always line 1.
+          const headerIndex = findSessionHeaderLineIndex(lines);
+          if (headerIndex === -1) continue;
+          const header = JSON.parse(lines[headerIndex]) as { type?: string; parentSession?: string };
           if (
             header.type === "session" &&
             header.parentSession &&
@@ -174,7 +178,7 @@ export async function DELETE(
           ) {
             // Rewrite header with new parentSession
             header.parentSession = parentSessionPath;
-            lines[0] = JSON.stringify(header);
+            lines[headerIndex] = JSON.stringify(header);
             writeFileSync(childPath, lines.join("\n"));
           }
         } catch { /* skip malformed */ }
