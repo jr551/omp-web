@@ -8,8 +8,18 @@ import type {
   OmpWebUpdateResponse,
 } from "@/lib/api-types";
 
-export const OMP_WEB_GITHUB_RELEASE_API_URL = "https://api.github.com/repos/ddallabenetta/omp-web/releases/latest";
-export const OMP_WEB_NPM_LATEST_URL = "https://registry.npmjs.org/omp-web/latest";
+/**
+ * This fork is not on npm (`omp-web` there is upstream's package), so its
+ * GitHub releases are the update source: each one attaches the `npm pack`
+ * tarball (`.github/scripts/release-assets.sh`), and installing that tarball
+ * keeps a fork install on the fork. Installing `omp-web@latest` would silently
+ * swap it for upstream.
+ */
+export const OMP_WEB_UPDATE_REPO = "jr551/omp-web";
+export const OMP_WEB_GITHUB_RELEASE_API_URL = `https://api.github.com/repos/${OMP_WEB_UPDATE_REPO}/releases/latest`;
+export const OMP_WEB_PACKAGE_SPEC = `https://github.com/${OMP_WEB_UPDATE_REPO}/releases/latest/download/omp-web.tgz`;
+const RELEASE_URL_PREFIX = `https://github.com/${OMP_WEB_UPDATE_REPO}/`;
+const PACKAGE_ASSET_NAME = "omp-web.tgz";
 
 const RELEASE_CACHE_SECONDS = 60 * 60;
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -33,10 +43,7 @@ interface GitHubReleasePayload {
   body?: unknown;
   html_url?: unknown;
   published_at?: unknown;
-}
-
-interface NpmPackagePayload {
-  version?: unknown;
+  assets?: unknown;
 }
 
 interface UpdateStatusOptions {
@@ -121,9 +128,9 @@ function releaseFromPayload(payload: GitHubReleasePayload): OmpWebReleaseInfo {
   const tagName = typeof payload.tag_name === "string" && payload.tag_name.trim()
     ? payload.tag_name.trim()
     : `v${version}`;
-  const htmlUrl = typeof payload.html_url === "string" && payload.html_url.startsWith("https://github.com/ddallabenetta/omp-web/")
+  const htmlUrl = typeof payload.html_url === "string" && payload.html_url.startsWith(RELEASE_URL_PREFIX)
     ? payload.html_url
-    : `https://github.com/ddallabenetta/omp-web/releases/tag/${encodeURIComponent(tagName)}`;
+    : `${RELEASE_URL_PREFIX}releases/tag/${encodeURIComponent(tagName)}`;
   const body = typeof payload.body === "string" ? payload.body.slice(0, MAX_CHANGELOG_LENGTH) : "";
 
   return {
@@ -136,21 +143,10 @@ function releaseFromPayload(payload: GitHubReleasePayload): OmpWebReleaseInfo {
   };
 }
 
-function releaseFromPackage(version: string): OmpWebReleaseInfo {
-  const tagName = `v${version}`;
-  return {
-    version,
-    tagName,
-    name: tagName,
-    body: "",
-    htmlUrl: `https://github.com/ddallabenetta/omp-web/releases/tag/${encodeURIComponent(tagName)}`,
-    publishedAt: null,
-  };
-}
-
-function publishedPackageFromPayload(payload: NpmPackagePayload): OmpWebPackageInfo | null {
-  const version = canonicalVersion(payload.version);
-  return version ? { version } : null;
+/** The release is installable only once its tarball has been uploaded. */
+function publishedPackageFromRelease(payload: GitHubReleasePayload, release: OmpWebReleaseInfo): OmpWebPackageInfo | null {
+  const assets = Array.isArray(payload.assets) ? payload.assets as Array<{ name?: unknown }> : [];
+  return assets.some((asset) => asset?.name === PACKAGE_ASSET_NAME) ? { version: release.version } : null;
 }
 
 async function fetchJson(url: string, fetcher: Fetcher): Promise<unknown> {
@@ -184,12 +180,12 @@ function selectManager(env: NodeJS.ProcessEnv, runtime: "bun" | "node"): UpdateM
 function commandForManager(manager: UpdateManager): { executable: string; args: string[]; command: string } {
   if (manager === "npm") {
     const executable = process.platform === "win32" ? "npm.cmd" : "npm";
-    const args = ["install", "--global", "omp-web@latest", "--no-audit", "--no-fund"];
-    return { executable, args, command: "npm install --global omp-web@latest" };
+    const args = ["install", "--global", OMP_WEB_PACKAGE_SPEC, "--no-audit", "--no-fund"];
+    return { executable, args, command: `npm install --global ${OMP_WEB_PACKAGE_SPEC}` };
   }
   const executable = process.platform === "win32" ? "bun.exe" : "bun";
-  const args = ["add", "--global", "omp-web@latest"];
-  return { executable, args, command: "bun add --global omp-web@latest" };
+  const args = ["add", "--global", OMP_WEB_PACKAGE_SPEC];
+  return { executable, args, command: `bun add --global ${OMP_WEB_PACKAGE_SPEC}` };
 }
 
 export function buildInstallPlan({
@@ -232,19 +228,9 @@ export async function getOmpWebUpdateStatus(options: UpdateStatusOptions = {}): 
   const fetcher = options.fetcher ?? fetch;
   const currentAppVersion = canonicalVersion(options.currentAppVersion ?? process.env.NEXT_PUBLIC_APP_VERSION) ?? "unknown";
 
-  const packagePayload = await fetchJson(OMP_WEB_NPM_LATEST_URL, fetcher) as NpmPackagePayload;
-  const latestPackage = publishedPackageFromPayload(packagePayload);
-  if (!latestPackage) throw new Error("The npm registry did not return a valid omp-web version");
-
-  let latestRelease = releaseFromPackage(latestPackage.version);
-  try {
-    const releasePayload = await fetchJson(OMP_WEB_GITHUB_RELEASE_API_URL, fetcher) as GitHubReleasePayload;
-    const candidate = releaseFromPayload(releasePayload);
-    if (compareVersions(candidate.version, latestPackage.version) === 0) latestRelease = candidate;
-  } catch {
-    // npm is the source of truth for installability; GitHub only enriches it with
-    // release notes and a release link.
-  }
+  const releasePayload = await fetchJson(OMP_WEB_GITHUB_RELEASE_API_URL, fetcher) as GitHubReleasePayload;
+  const latestRelease = releaseFromPayload(releasePayload);
+  const latestPackage = publishedPackageFromRelease(releasePayload, latestRelease);
 
   const install = buildInstallPlan({
     currentAppVersion,
@@ -252,7 +238,7 @@ export async function getOmpWebUpdateStatus(options: UpdateStatusOptions = {}): 
     env: options.env,
     runtime: options.runtime,
   });
-  const updateAvailable = isNewerVersion(latestPackage.version, currentAppVersion);
+  const updateAvailable = isNewerVersion(latestPackage?.version ?? null, currentAppVersion);
   const availability: OmpWebUpdateResponse["availability"] = !updateAvailable
     ? "up-to-date"
     : install.canInstall
