@@ -18,7 +18,8 @@
 // Usage: bun scripts/stage-desktop.mjs [--skip-build]
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
@@ -48,11 +49,24 @@ for (const entry of ["bin", "public", "next.config.ts", "package.json", "bun.loc
 // 3. production build straight into the staging dir (the dev `.next/` is
 //    never touched, so desktop builds cannot disturb `bun run dev`)
 if (!skipBuild) {
+  // The build runs against an empty home. On Windows runners the real profile
+  // holds legacy junctions (`Cookies`, ...) that deny listing, and something in
+  // the build walked it and failed with EPERM (upstream #46: no Windows
+  // installer was ever published). Nothing at build time needs the user's
+  // ~/.omp either, so an empty home also keeps the build hermetic.
+  const buildHome = mkdtempSync(join(tmpdir(), "omp-web-build-home-"));
   const build = spawnSync("bun", ["run", "build"], {
     cwd: root,
     stdio: "inherit",
-    env: { ...process.env, OMP_WEB_DIST_DIR: "src-tauri/server/.next" },
+    env: {
+      ...process.env,
+      OMP_WEB_DIST_DIR: "src-tauri/server/.next",
+      HOME: buildHome,
+      USERPROFILE: buildHome,
+      NEXT_TELEMETRY_DISABLED: "1",
+    },
   });
+  rmSync(buildHome, { recursive: true, force: true });
   if (build.status !== 0) {
     console.error("[stage-desktop] next build failed");
     process.exit(build.status ?? 1);

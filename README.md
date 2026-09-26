@@ -1,3 +1,10 @@
+> [!NOTE]
+> **This is an AI-maintained upstream fork** of [ddallabenetta/omp-web](https://github.com/ddallabenetta/omp-web).
+> It tracks the latest [omp (oh-my-pi)](https://github.com/can1357/oh-my-pi) releases, folds in fixes for upstream
+> issues and worthwhile upstream/fork pull requests, and ships a new release every week once the full test
+> suite passes. Upgrades and fixes are made by an automated OpenCode agent through pull requests gated by CI
+> ([how it works](docs/automation.md)). Label an issue `opencode` to hand it to the agent.
+
 <p align="center">
   <img src="./docs/hero.png" alt="omp-web — Browser workspace for omp" width="100%">
 </p>
