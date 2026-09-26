@@ -45,3 +45,4 @@ src-tauri/gen/
 src-tauri/resources/
 src-tauri/server/.remember/
 .playwright-mcp/
+.claude/worktrees/
