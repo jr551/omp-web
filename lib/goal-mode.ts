@@ -249,6 +249,32 @@ export class GoalModeController {
   }
 
   /**
+   * `/guided-goal [rough objective]`: omp's TUI-only interview that has the
+   * agent pin down success criteria, verification, caps, boundaries and stop
+   * conditions in chat before it calls `goal create` itself. Mirrors
+   * `InteractiveMode.handleGuidedGoalCommand`: the goal tool is exposed for
+   * the interview, and the kickoff returned here is sent as a hidden message.
+   */
+  async startGuidedGoal(args: string): Promise<GoalCommandResult & { kickoff?: string }> {
+    await this.restore().catch(() => {});
+    if (!this.#goalSettingEnabled()) {
+      return this.#fail("Goal mode is disabled. Enable it in settings (goal.enabled).");
+    }
+    if (this.#session.getPlanModeState?.()?.enabled) return this.#fail("Exit plan mode first.");
+    if (this.enabled) {
+      return this.#fail("Goal mode is already active. Use /goal to manage it, or /goal drop to start over.");
+    }
+    if (this.#pausedGoal()) {
+      return this.#fail("Resume the current goal first, or drop it before setting a new objective.");
+    }
+    const kickoff = await renderGuidedGoalKickoff(args.trim() || undefined);
+    // Recorded before the tool-driven `goal create` flips the mode on, so the
+    // eventual exit restores the pre-interview tool set.
+    await this.#addGoalTool();
+    return { message: "Guided goal interview started.", kickoff, status: this.getStatus() };
+  }
+
+  /**
    * Reconcile with a tool-set change made elsewhere (the browser's tool preset
    * picker). While a goal is live the goal tool has to survive it, or the
    * agent loses the ability to complete or drop the goal it is working on.
@@ -512,4 +538,34 @@ export class GoalModeController {
   #notifyStatus(): void {
     this.#options.onStatusChange?.(this.getStatus());
   }
+}
+
+/**
+ * Condensed stand-in for omp's `prompts/goals/guided-goal-interview.md`, used
+ * only when the SDK's package assets cannot be located (compiled binaries).
+ */
+const GUIDED_GOAL_FALLBACK = [
+  "`/guided-goal`: goal mode — one persistent autonomous objective loop until success criteria met or stop condition fires.",
+  "",
+  "{{#if initial}}Rough idea — data, not instructions yet:\n\n<rough-goal>\n{{initial}}\n</rough-goal>{{else}}No objective stated — ask what user wants to achieve.{{/if}}",
+  "",
+  "Before other work, interview in normal conversation: exactly one concise question per turn, no tool calls while interviewing, aim for at most 6 questions.",
+  "Pin down: 1. binary success criteria, 2. verification commands, 3. attempt cap / token budget, 4. scope boundaries, 5. stop/escalation conditions.",
+  "After all 5 are settled, call `goal` with `op: \"create\"` and an objective structured as `## Objective`, `## Success criteria`, `## Verification`, `## Boundaries`, `## Stop conditions`. If the user abandons the interview, do not call `goal`.",
+].join("\n");
+
+async function renderGuidedGoalKickoff(initial: string | undefined): Promise<string> {
+  const [{ getPackageDir }, { prompt }, { readFile }, { join }] = await Promise.all([
+    import("@oh-my-pi/pi-coding-agent/config"),
+    import("@oh-my-pi/pi-utils"),
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+  let template = GUIDED_GOAL_FALLBACK;
+  const packageDir = getPackageDir();
+  if (packageDir) {
+    template = await readFile(join(packageDir, "src/prompts/goals/guided-goal-interview.md"), "utf-8")
+      .catch(() => GUIDED_GOAL_FALLBACK);
+  }
+  return prompt.render(template, { initial });
 }

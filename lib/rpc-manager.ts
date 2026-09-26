@@ -213,9 +213,10 @@ function appendSlashCommand(
  * Browser-native builtins with no shared SDK handler; advertised with their
  * canonical registry metadata. `/goal` is a mode command omp implements as a
  * TUI-only handler, so it never reaches ACP discovery; omp-web drives the same
- * GoalRuntime itself (lib/goal-mode.ts) and advertises it here.
+ * GoalRuntime itself (lib/goal-mode.ts) and advertises it here. `/guided-goal`
+ * is the TUI-only interview front end to the same goal mode.
  */
-export const BROWSER_NATIVE_SLASH_COMMANDS = ["fork", "goal"] as const;
+export const BROWSER_NATIVE_SLASH_COMMANDS = ["fork", "goal", "guided-goal"] as const;
 
 /**
  * Keep the browser palette aligned with omp's own command registry and
@@ -527,7 +528,8 @@ export class AgentSessionWrapper {
       || type === "handoff"
       || type === "get_commands"
       || type === "execute_slash_command"
-      || type === "goal";
+      || type === "goal"
+      || type === "guided_goal";
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -582,11 +584,15 @@ export class AgentSessionWrapper {
    * browser must still see the session go busy, exactly as for a real prompt.
    */
   private async runGoalContinuation(prompt: string): Promise<void> {
+    await this.runHiddenTurn("goal-continuation", prompt);
+  }
+
+  private async runHiddenTurn(customType: string, prompt: string): Promise<void> {
     this.promptRunning = true;
     notifyRunningChange();
     try {
       await this.inner.promptCustomMessage({
-        customType: "goal-continuation",
+        customType,
         content: prompt,
         display: false,
         attribution: "user",
@@ -1052,6 +1058,15 @@ export class AgentSessionWrapper {
 
       case "goal": {
         return await this.goalMode.handleCommand((command.args as string | undefined) ?? "");
+      }
+
+      case "guided_goal": {
+        const result = await this.goalMode.startGuidedGoal((command.args as string | undefined) ?? "");
+        const { kickoff, ...response } = result;
+        if (!kickoff) return response;
+        this.goalMode.onUserPrompt();
+        await this.runHiddenTurn("guided-goal", kickoff);
+        return response;
       }
 
       case "execute_slash_command": {

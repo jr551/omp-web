@@ -1865,6 +1865,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return complete({ handled: true, message: result?.message ?? "Command completed" });
         }
 
+        case "guided-goal": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          if (agentRunningRef.current || bashRunningRef.current) {
+            return complete({ handled: true, error: "Cannot start a guided goal while the session is busy" });
+          }
+          // The interview kickoff is a hidden message the server runs as a
+          // turn, so the composer stays busy until the first question lands.
+          agentRunningRef.current = true;
+          setAgentRunning(true);
+          try {
+            await ensureEventsConnected(sid);
+            const result = await sendAgentCommand<GoalCommandResponse>(sid, { type: "guided_goal", args });
+            setGoalStatus(result?.status ?? null);
+            if (result?.error) return complete({ handled: true, error: result.error });
+            if (await loadSession(sid, true)) promoteNewSession();
+            return complete({ handled: true, message: result?.message ?? "Guided goal interview started" });
+          } finally {
+            agentRunningRef.current = false;
+            setAgentRunning(false);
+            if (sessionIdRef.current === sid) scheduleEventStreamClose(sid);
+          }
+        }
+
         case "handoff": {
           if (!sid) return complete({ handled: true, error: "No active session" });
           if (agentRunningRef.current || bashRunningRef.current) {
