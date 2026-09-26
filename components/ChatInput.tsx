@@ -158,6 +158,7 @@ const BUILTIN_SLASH_COMMANDS: LocalBuiltinSlashCommand[] = [
   { name: "name", descriptionKey: "chat.commandName", source: "builtin" },
   { name: "session", descriptionKey: "chat.commandSession", source: "builtin" },
   { name: "copy", descriptionKey: "chat.commandCopy", source: "builtin" },
+  { name: "plan", descriptionKey: "chat.commandPlan", source: "builtin" },
 ];
 
 const SLASH_SOURCES: SlashCommandSource[] = ["builtin", "extension", "custom", "mcp_prompt", "prompt", "file", "skill"];

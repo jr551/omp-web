@@ -263,11 +263,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
     autoFollowPaused, resumeAutoFollow,
     goalStatus,
     advisorStatus,
+    planMode,
     sessionIdRef, messagesEndRef, scrollContainerRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleRoleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
-    handleBuiltinSlashCommand,
+    handleBuiltinSlashCommand, handleSetPlanMode,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
@@ -369,6 +370,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
   }, [onSubagentsChange, subagents]);
   useEffect(() => () => { onSubagentsChange?.([]); }, [onSubagentsChange]);
 
+  const handleExitPlanMode = useCallback(() => {
+    void handleSetPlanMode(false);
+  }, [handleSetPlanMode]);
 
   const onDrop = useCallback((files: File[]) => {
     if (sessionBusy) return;
@@ -825,6 +829,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
             <GoalBar goal={goalStatus} t={t} />
+            <PlanModeBar planMode={planMode} busy={sessionBusy} onExit={handleExitPlanMode} t={t} />
             {advisorStatus && (
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
                 <AdvisorBadge status={advisorStatus} t={t} />
@@ -846,6 +851,63 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
  * Goal mode runs a continuation loop between turns, so the operator needs to
  * see that it is on and how much budget is left without asking for it.
  */
+function PlanModeBar({ planMode, busy, onExit, t }: {
+  planMode: { enabled: boolean; planFilePath?: string } | null;
+  busy: boolean;
+  onExit: () => void;
+  t: (key: string, params?: Record<string, string | number>) => string;
+}) {
+  if (!planMode?.enabled) return null;
+  const planFile = planMode.planFilePath;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        marginBottom: 8,
+        padding: "5px 10px",
+        border: "1px solid var(--border)",
+        borderRadius: 7,
+        background: "var(--bg-panel)",
+        color: "var(--text-muted)",
+        fontSize: 11,
+        fontFamily: "var(--font-mono)",
+      }}
+    >
+      <span style={{ color: "var(--accent)", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", flexShrink: 0 }}>
+        {t("chat.planModeLabel")}
+      </span>
+      <span
+        title={planFile}
+        style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)" }}
+      >
+        {planFile ? planFile.split("/").pop() : t("chat.planModeHint")}
+      </span>
+      <button
+        type="button"
+        onClick={onExit}
+        disabled={busy}
+        title={t("chat.planModeExit")}
+        style={{
+          flexShrink: 0,
+          padding: "1px 8px",
+          border: "1px solid var(--border)",
+          borderRadius: 5,
+          background: "none",
+          color: "var(--text-muted)",
+          fontSize: 11,
+          fontFamily: "inherit",
+          cursor: busy ? "not-allowed" : "pointer",
+          opacity: busy ? 0.55 : 1,
+        }}
+      >
+        {t("chat.planModeExit")}
+      </button>
+    </div>
+  );
+}
+
 function GoalBar({ goal, t }: { goal: GoalStatusInfo | null; t: (key: string, params?: Record<string, string | number>) => string }) {
   if (!goal) return null;
   const paused = !goal.enabled;

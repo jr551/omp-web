@@ -19,6 +19,7 @@ import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { AdvisorStatusInfo, ContextUsage, GoalStatusInfo, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
+import { planSlashCommandIntent, planSlashCommandOutcome, type WebPlanModeInfo } from "@/lib/plan-mode-web";
 
 export interface SessionData {
   sessionId: string;
@@ -27,6 +28,7 @@ export interface SessionData {
   tree: SessionTreeNode[];
   leafId: string | null;
   contextUsage?: ContextUsage;
+  planMode?: WebPlanModeInfo;
   context: {
     messages: AgentMessage[];
     entryIds: string[];
@@ -90,6 +92,7 @@ type AgentStateResponse = {
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
   subagents?: SubagentSnapshot[];
   goal?: GoalStatusInfo | null;
+  planMode?: WebPlanModeInfo | null;
   advisor?: AdvisorStatusInfo | null;
 };
 
@@ -433,6 +436,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const completionScrollAllowedRef = useRef(true);
   const [autoFollowPaused, setAutoFollowPaused] = useState(false);
   const [goalStatus, setGoalStatus] = useState<GoalStatusInfo | null>(null);
+  const [planMode, setPlanMode] = useState<WebPlanModeInfo | null>(null);
   const [advisorStatus, setAdvisorStatus] = useState<AdvisorStatusInfo | null>(null);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
@@ -520,6 +524,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
       setContextUsage(d.contextUsage ?? null);
+      if (d.planMode !== undefined) setPlanMode(d.planMode ?? null);
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setError(null);
       setThinkingLevel((d.context.configuredThinkingLevel ?? d.context.thinkingLevel ?? "off") as ThinkingLevelOption);
@@ -547,6 +552,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
           if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
           if (liveState.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, liveState.subagents ?? []));
+          if (liveState.planMode !== undefined) setPlanMode(liveState.planMode ?? null);
         } else if (!agentState.running) {
           setQueuedMessages({ steering: [], followUp: [] });
         }
@@ -1080,6 +1086,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
       if (state?.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
       setSubagents((current) => mergeSubagentSnapshots(current, state?.subagents ?? []));
+      if (state?.planMode !== undefined) setPlanMode(state.planMode ?? null);
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting || state.isHandoffRunning);
       if (busy || !agentRunningRef.current) return;
@@ -1183,6 +1190,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
               if (d.state?.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, d.state?.subagents ?? []));
               if (d.state?.goal !== undefined) setGoalStatus(d.state.goal ?? null);
+              if (d.state?.planMode !== undefined) setPlanMode(d.state.planMode ?? null);
               if (d.state?.advisor !== undefined) setAdvisorStatus(d.state.advisor ?? null);
               // Aborted turns can leave messages queued in pi (delivered with the
               // next turn); dead wrapper (no state) means the queue is gone.
@@ -1194,6 +1202,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "goal_status":
         setGoalStatus((event.status as GoalStatusInfo | null | undefined) ?? null);
         break;
+      case "mode_change": {
+        // Server-side transitions (toggle, /plan, plan approval) push the new
+        // mode so every open tab follows without waiting for a poll.
+        const planFilePath = typeof event.planFilePath === "string" ? event.planFilePath : undefined;
+        setPlanMode(event.mode === "plan" ? { enabled: true, ...(planFilePath ? { planFilePath } : {}) } : { enabled: false });
+        break;
+      }
       case "advisor_status":
         setAdvisorStatus((event.status as AdvisorStatusInfo | null | undefined) ?? null);
         break;
@@ -1770,6 +1785,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew, newSessionCwd, session?.cwd]);
 
+  // Enter/exit plan mode. The plan-mode bar and `/plan` share this path, and it
+  // never reaches the model as a prompt. Resolves null on success, or the
+  // (already noticed) error so `/plan` can keep the composer text.
+  const handleSetPlanMode = useCallback(async (enabled: boolean): Promise<string | null> => {
+    const sid = sessionIdRef.current ?? await ensureNewSession();
+    if (!sid) {
+      const message = "No active session";
+      addNotice({ type: "error", message });
+      return message;
+    }
+    try {
+      const result = await sendAgentCommand<{ planMode?: WebPlanModeInfo }>(sid, { type: "set_plan_mode", enabled });
+      if (result?.planMode) setPlanMode(result.planMode);
+      return null;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      addNotice({ type: "error", message });
+      return message;
+    }
+  }, [addNotice, ensureNewSession]);
+
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -1894,6 +1930,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
 
+        case "plan": {
+          // omp's /plan is TUI-only; without this it reached the model as text.
+          const intent = planSlashCommandIntent(text, planMode?.enabled ?? false);
+          if (!intent) return { handled: false };
+          const outcome = planSlashCommandOutcome(intent, await handleSetPlanMode(intent.enabled));
+          // handleSetPlanMode already raised the error notice.
+          if (outcome.error) return outcome;
+          return complete(outcome);
+        }
+
         case "handoff": {
           if (!sid) return complete({ handled: true, error: "No active session" });
           if (agentRunningRef.current || bashRunningRef.current) {
@@ -1950,7 +1996,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, appendCommandOutput, ensureEventsConnected, ensureNewSession, handleFork, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen, scheduleEventStreamClose]);
+  }, [addNotice, appendCommandOutput, ensureEventsConnected, ensureNewSession, handleFork, handleSetPlanMode, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, planMode, promoteNewSession, onSessionStatsPanelOpen, scheduleEventStreamClose]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -2159,6 +2205,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(state.queuedMessages));
           if (state.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, state.subagents ?? []));
           if (state.goal !== undefined) setGoalStatus(state.goal ?? null);
+          if (state.planMode !== undefined) setPlanMode(state.planMode ?? null);
           if (state.advisor !== undefined) setAdvisorStatus(state.advisor ?? null);
         }
       });
@@ -2276,13 +2323,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoFollowPaused, resumeAutoFollow,
     goalStatus,
     advisorStatus,
+    planMode,
     // Refs
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleRoleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
-    handleBuiltinSlashCommand,
+    handleBuiltinSlashCommand, handleSetPlanMode,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,

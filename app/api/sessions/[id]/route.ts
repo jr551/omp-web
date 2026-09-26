@@ -14,6 +14,7 @@ import {
 import { sessionPathKey } from "@/lib/session-path";
 import { setSessionArchived } from "@/lib/session-archive";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { readPersistedPlanModeState, toWebPlanModeInfo, type ModeChangeEntryLike } from "@/lib/plan-mode-web";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
@@ -70,6 +71,12 @@ export async function GET(
       parentSessionId,
       transient: !filePath || !existsSync(filePath),
     } : null;
+    // A session planned in the TUI has no live wrapper yet; read its mode
+    // from the journal so the browser shows it before the first prompt.
+    const planMode = toWebPlanModeInfo(
+      liveRpc?.inner.getPlanModeState?.()
+        ?? readPersistedPlanModeState(entries as ModeChangeEntryLike[]),
+    );
 
     return NextResponse.json({
       sessionId: id,
@@ -79,6 +86,7 @@ export async function GET(
       tree,
       context,
       totalActiveMs,
+      planMode,
       ...(contextUsage ? { contextUsage } : {}),
     });
   } catch (error) {

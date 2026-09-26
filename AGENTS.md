@@ -243,6 +243,16 @@ project, filters project-local entries out of omp's discovered extension and
 custom-tool paths and disables MCP. Skills and rules are data and always load.
 See `docs/project-trust.md`.
 
+### Plan mode is toggled with the ACP semantics
+omp's `/plan` is a TUI-only builtin (`handleTui`), so `execute_slash_command`
+cannot run it and it used to reach the model as text. The browser handles
+`/plan` itself and sends `set_plan_mode`, which does what omp's ACP mode switch
+does (`lib/plan-mode-web.ts`): set/clear `PlanModeState` and the plan-proposal
+handler, append a `mode_change` journal entry (the same record the TUI writes
+and restores from), and emit a `mode_change` SSE event. It is refused while the
+agent runs and while goal mode is active. Approval still goes through the
+existing `plan_review` dialog.
+
 ### `SYSTEM.md` / `APPEND_SYSTEM.md` are resolved per session cwd
 `omp` resolves both files before it creates a session and passes them as
 `customSystemPrompt` / `appendSystemPrompt`. `startRpcSession()` builds its own

@@ -37,6 +37,12 @@ import { persistExplicitStartupPreferences } from "./startup-preferences";
 import type { SlashCommandInfo } from "./omp-types";
 import type { AdvisorStatusInfo, AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./omp-types";
 import { GoalModeController } from "./goal-mode";
+import {
+  applyWebPlanModeTransition,
+  readPersistedPlanModeState,
+  toWebPlanModeInfo,
+  type ModeChangeEntryLike,
+} from "./plan-mode-web";
 import type {
   ExtensionAskDialogResult,
   ExtensionUiRequest,
@@ -644,27 +650,8 @@ export class AgentSessionWrapper {
   private syncPlanModeFromSession(): void {
     let state = this.inner.getPlanModeState?.();
     if (!state) {
-      const entries = this.inner.sessionManager.getEntries() as Array<{
-        type?: string;
-        mode?: string;
-        data?: Record<string, unknown>;
-      }>;
-      let persistedMode: (typeof entries)[number] | undefined;
-      for (let index = entries.length - 1; index >= 0; index -= 1) {
-        if (entries[index]?.type !== "mode_change") continue;
-        persistedMode = entries[index];
-        break;
-      }
-      const planFilePath = persistedMode?.data?.planFilePath;
-      if (persistedMode?.mode === "plan" && typeof planFilePath === "string" && planFilePath.length > 0) {
-        state = {
-          enabled: true,
-          planFilePath,
-          workflow: persistedMode.data?.workflow === "sequential" ? "sequential" : "parallel",
-          reentry: true,
-        };
-        this.inner.setPlanModeState?.(state);
-      }
+      state = readPersistedPlanModeState(this.inner.sessionManager.getEntries() as ModeChangeEntryLike[]);
+      if (state) this.inner.setPlanModeState?.(state);
     }
 
     if (state?.enabled) {
@@ -717,6 +704,7 @@ export class AgentSessionWrapper {
       this.inner.setPlanProposalHandler?.(null);
       this.inner.setPlanModeState?.(undefined);
       this.inner.sessionManager.appendModeChange("none");
+      this.emit({ type: "mode_change", mode: "none" });
       return {
         content: [{
           type: "text",
@@ -853,6 +841,9 @@ export class AgentSessionWrapper {
         return null;
 
       case "get_state": {
+        // Plan mode may live only in the journal (a fresh wrapper for a
+        // session planned in the TUI); surface it before reading state.
+        this.syncPlanModeFromSession();
         const model = this.inner.model;
         const contextUsage = this.inner.getContextUsage();
         return {
@@ -883,6 +874,7 @@ export class AgentSessionWrapper {
           subagents: this.getSubagentSnapshots(),
           goal: this.goalMode.getStatus(),
           advisor: this.getAdvisorStatus(),
+          planMode: toWebPlanModeInfo(this.inner.getPlanModeState?.()),
         };
       }
       case "get_subagents":
@@ -1098,6 +1090,34 @@ export class AgentSessionWrapper {
         this.goalMode.onUserPrompt();
         await this.runHiddenTurn("guided-goal", kickoff);
         return response;
+      }
+
+      case "set_plan_mode": {
+        // omp's `/plan` is TUI-only, so the browser toggles plan mode with the
+        // same state change omp's ACP mode switch makes. Rehydrate first: a
+        // restarted wrapper has no live state while the journal still says plan.
+        this.syncPlanModeFromSession();
+        const enabled = command.enabled === true;
+        if (this.isRunning()) {
+          throw new Error("Cannot change plan mode while the agent is running");
+        }
+        if (enabled && !this.inner.getPlanModeState?.()?.enabled) {
+          if (getSetting<boolean>(this.inner.settings, "plan.enabled") === false) {
+            throw new Error("Plan mode is disabled. Enable it in settings (plan.enabled).");
+          }
+          if (this.goalMode.enabled) throw new Error("Exit goal mode first.");
+        }
+        const planMode = applyWebPlanModeTransition(
+          this.inner,
+          enabled,
+          (title) => this.handlePlanProposal(title),
+        );
+        this.emit({
+          type: "mode_change",
+          mode: planMode.enabled ? "plan" : "none",
+          ...(planMode.planFilePath ? { planFilePath: planMode.planFilePath } : {}),
+        });
+        return { planMode };
       }
 
       case "execute_slash_command": {
