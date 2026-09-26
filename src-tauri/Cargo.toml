@@ -5,7 +5,7 @@ description = "Tauri v2 desktop shell for omp-web"
 authors = ["omp-web contributors"]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/ddallabenetta/omp-web"
+repository = "https://github.com/jr551/omp-web"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

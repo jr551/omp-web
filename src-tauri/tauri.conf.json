@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "omp-desktop",
   "version": "0.2.10",
-  "identifier": "com.ddallabenetta.omp-desktop",
+  "identifier": "com.jr551.omp-desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://127.0.0.1:30141",
