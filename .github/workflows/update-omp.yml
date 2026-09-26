@@ -362,3 +362,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: v${{ steps.metadata.outputs.package_version }}
         run: gh workflow run publish-npm.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG" -f ref="$RELEASE_TAG"
+
+      # A tag created with GITHUB_TOKEN does not trigger publish-desktop.yml's
+      # tag-push trigger, so dispatch it; it skips itself without a signing key.
+      - name: Start desktop publish for the release tag
+        if: steps.github_release.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ steps.metadata.outputs.package_version }}
+        run: gh workflow run publish-desktop.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG" || true

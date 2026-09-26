@@ -13,15 +13,11 @@ One script defines green for every workflow and for the agent:
 
 1. `bun install --frozen-lockfile`
 2. `bun run typecheck`
-3. `bun run lint` — **currently non-fatal**: `main` has pre-existing React
-   Compiler errors (`react-hooks/preserve-manual-memoization` in
-   `components/ChatInput.tsx` and `hooks/useAgentSession.ts`). Failures are
-   reported as a warning. Once lint is clean, set `LINT_STRICT` to default to `1`
-   in the script.
+3. `bun run lint` — fatal (set `LINT_STRICT=0` to only report).
 4. `bun test`
 5. `bun run build`
 
-Knobs: `SKIP_INSTALL=1`, `SKIP_BUILD=1`, `LINT_STRICT=1`, `REPO_ROOT=<dir>`.
+Knobs: `SKIP_INSTALL=1`, `SKIP_BUILD=1`, `LINT_STRICT=0`, `REPO_ROOT=<dir>`.
 The build writes `.next/`; do not run the script in a checkout where
 `bun run dev` is running (see AGENTS.md).
 
@@ -35,7 +31,7 @@ The build writes `.next/`; do not run the script in a checkout where
 | `opencode-agent.yml` | dispatch (`task`, optional `branch`/`pr`/`models`), issue labeled `opencode`, Wednesday 04:00 UTC sweep | The autonomous maintainer (below). |
 | `docker.yml` | release published, dispatch (`tag`) | Builds the `Dockerfile` and pushes `ghcr.io/<owner>/omp-web:<version>` and `:latest` (amd64). |
 | `publish-npm.yml` | tag push, dispatch | Upstream-only: skipped unless the repository is `ddallabenetta/omp-web` or the repo variable `NPM_PUBLISH=true` is set (the fork cannot publish the `omp-web` name). |
-| `publish-desktop.yml` | tag push, dispatch | Skipped unless the `TAURI_SIGNING_PRIVATE_KEY` secret exists. |
+| `publish-desktop.yml` | tag push, dispatch (both release workflows dispatch it) | macOS universal app + Windows NSIS installer, signed for the in-app updater (`latest.json`). Skipped unless the `TAURI_SIGNING_PRIVATE_KEY` secret exists (it is set on this fork). |
 
 ### Releases without npm
 
