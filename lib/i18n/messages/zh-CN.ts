@@ -11,6 +11,8 @@ export const zhCNLocale: LocalePlugin = {
     "common.skills": "技能",
     "common.plugins": "插件",
     "common.settings": "设置",
+    "versionRefresh.updated": "omp-web 已更新：",
+    "versionRefresh.refresh": "刷新",
     "updates.available": "有可用的 omp-web 更新",
     "updates.availableTitle": "omp-web {version} 可用",
     "updates.dialogEyebrow": "omp-web 发布",

@@ -11,6 +11,8 @@ export const enLocale: LocalePlugin = {
     "common.skills": "Skills",
     "common.plugins": "Plugins",
     "common.settings": "Settings",
+    "versionRefresh.updated": "omp-web was updated:",
+    "versionRefresh.refresh": "Refresh",
     "updates.available": "omp-web update available",
     "updates.availableTitle": "omp-web {version} is available",
     "updates.dialogEyebrow": "omp-web release",

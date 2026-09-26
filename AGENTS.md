@@ -90,6 +90,7 @@ app/api/
   plugins/route.ts                GET/POST omp plugin management
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
+  version/route.ts                GET running server build version (stale-tab refresh banner)
   web-access/route.ts             GET/PUT the password lock (settings -> Access)
   web-access/recovery/route.ts    POST recovery code request/redeem (unauthenticated)
   worktrees/route.ts              GET/POST/DELETE git worktrees
