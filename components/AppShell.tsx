@@ -18,7 +18,15 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
+import { observeViewportLayout } from "@/hooks/usePopupPlacement";
 import { copyText } from "@/lib/clipboard";
+import {
+  computeAnchoredPanelRect,
+  readPanelViewport,
+  sameAnchoredPanelRect,
+  type AnchoredPanelRect,
+} from "@/lib/popup-placement";
+import { sessionInfoGridLayout } from "@/lib/session-info-layout";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
@@ -53,6 +61,9 @@ type AutoNameStatus =
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
+/** Space kept between a top-bar dropdown and the bottom of the visible viewport. */
+const TOP_PANEL_VIEWPORT_MARGIN_PX = 8;
+const TOP_PANEL_MIN_HEIGHT_PX = 120;
 
 type OpenFileHandler = (
   filePath: string,
@@ -252,7 +263,7 @@ export function AppShell() {
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | null>(null);
-  const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [topPanelPos, setTopPanelPos] = useState<AnchoredPanelRect | null>(null);
 
   const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language") => {
     if (isMobile) setSidebarOpen(false);
@@ -269,28 +280,52 @@ export function AppShell() {
     setSidebarOpen((open) => !open);
   }, [isMobile]);
 
+  // Top-bar dropdowns are fixed-position, so they are measured against the
+  // visible viewport rather than trusting the bar's own box: the bar can be
+  // wider than the viewport while both side panels are open, and the viewport
+  // shrinks under an on-screen keyboard. Re-measured on every layout change
+  // (sidebar/file panel open, close, resize or transition; window, zoom and
+  // visual-viewport changes) so the panel never runs past an edge.
   useEffect(() => {
     if (!activeTopPanel || !topBarRef.current) return;
-    const update = () => {
-      const topBarRect = topBarRef.current!.getBoundingClientRect();
-      if (activeTopPanel === "language" && !isMobile && languageBtnRef.current) {
-        const buttonRect = languageBtnRef.current.getBoundingClientRect();
-        const width = Math.min(LANGUAGE_MENU_WIDTH, topBarRect.width);
-        const left = Math.min(
-          buttonRect.left - 1,
-          Math.max(topBarRect.left, topBarRect.right - width),
-        );
-        setTopPanelPos({ top: topBarRect.bottom, left, width });
-        return;
-      }
-      setTopPanelPos({ top: topBarRect.bottom, left: topBarRect.left, width: topBarRect.width });
+    let frameId: number | null = null;
+    const measure = () => {
+      frameId = null;
+      const topBar = topBarRef.current;
+      if (!topBar) return;
+      const topBarRect = topBar.getBoundingClientRect();
+      const viewport = readPanelViewport();
+      const languageButton = activeTopPanel === "language" && !isMobile ? languageBtnRef.current : null;
+      const buttonRect = languageButton?.getBoundingClientRect();
+      const next = computeAnchoredPanelRect(
+        buttonRect
+          ? { top: topBarRect.top, bottom: topBarRect.bottom, left: buttonRect.left - 1, right: buttonRect.left - 1 + LANGUAGE_MENU_WIDTH }
+          : topBarRect,
+        viewport,
+        {
+          ...(buttonRect ? { preferredWidth: LANGUAGE_MENU_WIDTH, bounds: { left: topBarRect.left, right: topBarRect.right } } : {}),
+          gap: 0,
+          margin: TOP_PANEL_VIEWPORT_MARGIN_PX,
+          minHeight: TOP_PANEL_MIN_HEIGHT_PX,
+          prefer: "below",
+        },
+      );
+      setTopPanelPos((current) => (sameAnchoredPanelRect(current, next) ? current : next));
     };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(topBarRef.current);
-    if (languageBtnRef.current) ro.observe(languageBtnRef.current);
-    return () => ro.disconnect();
-  }, [activeTopPanel, isMobile]);
+    const schedule = () => {
+      if (frameId !== null) return;
+      frameId = window.requestAnimationFrame(measure);
+    };
+    measure();
+    const unsubscribe = observeViewportLayout([topBarRef.current, languageBtnRef.current, document.documentElement], schedule);
+    // Side panels animate their width; settle on the final geometry too.
+    document.addEventListener("transitionend", schedule, true);
+    return () => {
+      unsubscribe();
+      document.removeEventListener("transitionend", schedule, true);
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+    };
+  }, [activeTopPanel, isMobile, sidebarOpen, rightPanelOpen]);
 
   // Right panel — file tabs only
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
@@ -1412,13 +1447,17 @@ export function AppShell() {
           })()}
           {/* Top panel dropdown — shared, only one active at a time */}
           {activeTopPanel && topPanelPos && (
-            <div style={{
+            <div data-top-panel={activeTopPanel} style={{
               position: "fixed",
               top: topPanelPos.top,
+              bottom: topPanelPos.bottom,
               left: topPanelPos.left,
               width: topPanelPos.width,
-              maxHeight: `calc(100dvh - ${topPanelPos.top}px)`,
+              maxWidth: "100vw",
+              maxHeight: topPanelPos.maxHeight,
+              overflowX: "hidden",
               overflowY: "auto",
+              overscrollBehavior: "contain",
               zIndex: 500,
             }}>
               {activeTopPanel === "language" && (
@@ -1471,7 +1510,7 @@ export function AppShell() {
                 }}>
                   {systemPrompt ? (
                     <div style={{
-                      maxHeight: "min(600px, 75vh)",
+                      maxHeight: Math.min(600, topPanelPos.maxHeight),
                       overflowY: "auto",
                       padding: "12px 16px",
                       color: "var(--text-muted)",
@@ -1619,8 +1658,12 @@ export function AppShell() {
                         </button>
                       );
                     };
+                    // Columns follow the panel's measured width, so a narrow
+                    // centre column (sidebar + file panel open) stacks the
+                    // sections instead of pushing the panel past the edge.
+                    const sessionInfoLayout = sessionInfoGridLayout(topPanelPos.width, isMobile);
                     const sessionInfoSection = (
-                      <div style={{ minWidth: 0 }}>
+                      <div style={{ minWidth: 0, gridColumn: sessionInfoLayout.infoSpansRow ? "1 / -1" : undefined }}>
                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{translate("session.infoSection")}</div>
                         <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
                           {sessionRows.map((row) => (
@@ -1643,10 +1686,8 @@ export function AppShell() {
                     return (
                       <div style={{
                         display: "grid",
-                        gridTemplateColumns: isMobile
-                          ? "1fr"
-                          : "minmax(360px, 1.7fr) minmax(140px, 0.55fr) minmax(190px, 0.75fr)",
-                        gap: isMobile ? 16 : 24,
+                        gridTemplateColumns: sessionInfoLayout.columns,
+                        gap: sessionInfoLayout.gap,
                         fontSize: 12,
                         lineHeight: 1.5,
                         fontFamily: "var(--font-mono)",

@@ -1535,3 +1535,35 @@ span.linenumber {
     animation: none;
   }
 }
+
+/*
+ * Viewport-bounded dialogs (issue #54). Modals set their preferred size inline;
+ * these rules only clamp it, so a dialog is always centred inside the visible
+ * viewport with a safe margin and scrolls internally instead of running past
+ * the top or bottom edge. --app-viewport-height follows the visual viewport
+ * while a mobile keyboard is open (hooks/useViewportHeight.ts).
+ */
+:root {
+  --dialog-viewport-margin: 8px;
+  --dialog-viewport-height: var(--app-viewport-height, 100dvh);
+}
+.viewport-dialog-backdrop {
+  bottom: auto !important;
+  height: var(--dialog-viewport-height) !important;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.viewport-dialog {
+  max-width: min(100%, calc(100vw - 2 * var(--dialog-viewport-margin))) !important;
+  max-height: min(
+    100%,
+    calc(
+      var(--dialog-viewport-height)
+        - 2 * var(--dialog-viewport-margin)
+        - env(safe-area-inset-top)
+        - env(safe-area-inset-bottom)
+    )
+  ) !important;
+  min-height: 0;
+  flex-shrink: 1;
+}

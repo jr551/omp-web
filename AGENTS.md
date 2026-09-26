@@ -351,6 +351,22 @@ The chat is not a tab and is never hidden: selecting another session still
 remounts `ChatWindow` (`key={sessionKey}`), because `useAgentSession` loads and
 wires SSE in mount-only effects.
 
+### Popovers and dialogs stay inside the viewport
+- Anchored popups use `lib/popup-placement.ts`: `computePopupPlacement()` picks
+  above/below and caps the height; `computeAnchoredPanelRect()` also clamps the
+  width/left to the visible viewport (plus optional bounds) for fixed-position
+  panels such as the top-bar dropdowns. `observeViewportLayout()` in
+  `hooks/usePopupPlacement.ts` is the one subscription (ResizeObserver, window
+  resize/scroll, visualViewport) to re-measure them.
+- The top-bar session/cost panel lays out its grid from the measured panel width
+  (`lib/session-info-layout.ts`); never give it fixed column minimums again —
+  with both side panels open the centre column can be narrower than 770px.
+- Modals add `viewport-dialog-backdrop` (fixed backdrop) and `viewport-dialog`
+  (the dialog box) from `app/globals.css`. Those rules only clamp with
+  `!important`, so each dialog keeps its inline preferred size. Use `dvh` or
+  `--app-viewport-height`, never `100vh`, when sizing a modal; embedded settings
+  panes must not get the classes.
+
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` as `omp-sound-enabled` and reuses one `AudioContext`.
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.

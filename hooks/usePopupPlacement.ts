@@ -20,6 +20,33 @@ function viewportHeight(): number {
 }
 
 /**
+ * Call `onChange` whenever something that moves or resizes an anchored popup
+ * happens: the observed elements change size (a sidebar opening shrinks the
+ * top bar, the composer grows), the window or visual viewport resizes (zoom,
+ * on-screen keyboard), or anything scrolls. Returns the unsubscribe function.
+ */
+export function observeViewportLayout(
+  elements: ReadonlyArray<Element | null | undefined>,
+  onChange: () => void,
+): () => void {
+  const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onChange);
+  for (const element of elements) {
+    if (element) observer?.observe(element);
+  }
+  window.addEventListener("resize", onChange);
+  window.addEventListener("scroll", onChange, true);
+  window.visualViewport?.addEventListener("resize", onChange);
+  window.visualViewport?.addEventListener("scroll", onChange);
+  return () => {
+    observer?.disconnect();
+    window.removeEventListener("resize", onChange);
+    window.removeEventListener("scroll", onChange, true);
+    window.visualViewport?.removeEventListener("resize", onChange);
+    window.visualViewport?.removeEventListener("scroll", onChange);
+  };
+}
+
+/**
  * Track where a popup anchored to `anchorRef` should open and how tall it may
  * be. Recomputed while open on resize, zoom, and layout changes of the anchor
  * (the composer grows as the user types), so a popup never runs off-screen.
@@ -55,21 +82,7 @@ export function usePopupPlacement(
   useEffect(() => {
     if (!open) return;
     measure();
-
-    const anchor = anchorRef.current;
-    const observer = anchor ? new ResizeObserver(measure) : null;
-    if (anchor && observer) observer.observe(anchor);
-    window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
-    window.visualViewport?.addEventListener("resize", measure);
-    window.visualViewport?.addEventListener("scroll", measure);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
-      window.visualViewport?.removeEventListener("resize", measure);
-      window.visualViewport?.removeEventListener("scroll", measure);
-    };
+    return observeViewportLayout([anchorRef.current], measure);
   }, [anchorRef, measure, open]);
 
   return placement;

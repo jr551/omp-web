@@ -756,6 +756,7 @@ export function PluginsConfig({
 
   return (
     <div
+      className={embedded ? undefined : "viewport-dialog-backdrop"}
       style={{
         position: embedded ? "relative" : "fixed",
         inset: embedded ? undefined : 0,
@@ -772,6 +773,7 @@ export function PluginsConfig({
       }}
     >
       <div
+        className={embedded ? undefined : "viewport-dialog"}
         style={{
           width: embedded ? "100%" : isMobile ? "calc(100vw - 16px)" : 860,
           maxWidth: embedded ? "none" : "calc(100vw - 16px)",

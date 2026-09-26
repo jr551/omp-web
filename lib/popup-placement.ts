@@ -59,3 +59,117 @@ export function computePopupPlacement(
 export function preferredPopupHeight(viewportHeight: number, viewportFraction: number, cap: number): number {
   return Math.min(viewportHeight * viewportFraction, cap);
 }
+
+export interface PanelAnchorRect {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+/** Visible viewport, in the same (layout-viewport) coordinates as getBoundingClientRect. */
+export interface PanelViewport {
+  width: number;
+  height: number;
+  /** visualViewport.offsetTop — non-zero while a mobile keyboard pans the page. */
+  offsetTop?: number;
+  offsetLeft?: number;
+}
+
+export interface AnchoredPanelOptions extends PopupPlacementOptions {
+  /** Desired width. Defaults to the anchor width (a panel that spans its trigger bar). */
+  preferredWidth?: number;
+  /** Desired height before clamping to the space available. Defaults to all of it. */
+  preferredMaxHeight?: number;
+  /** Anchor edge the panel lines up with when it is narrower than the anchor. */
+  align?: "start" | "end";
+  /** Horizontal room kept free at the viewport edges. */
+  horizontalMargin?: number;
+  /** Extra horizontal limits (e.g. the top bar) the panel must stay inside. */
+  bounds?: { left: number; right: number };
+}
+
+export interface AnchoredPanelRect {
+  side: PopupSide;
+  /** Set when the panel opens below the anchor. */
+  top?: number;
+  /** Set when the panel opens above the anchor (distance from the layout viewport bottom). */
+  bottom?: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+}
+
+/**
+ * Size and place a fixed-position panel next to an anchor so it never leaves
+ * the visible viewport: its width is clamped to the viewport (and optional
+ * bounds), it is shifted back inside when it would run past either edge, and
+ * its height is capped to the room on the side it opens on — below the anchor
+ * by default, flipping above only when that side is roomier. Content taller
+ * than `maxHeight` is expected to scroll inside the panel.
+ */
+export function computeAnchoredPanelRect(
+  anchor: PanelAnchorRect,
+  viewport: PanelViewport,
+  options: AnchoredPanelOptions = {},
+): AnchoredPanelRect {
+  const hMargin = Math.max(0, options.horizontalMargin ?? 0);
+  const offsetLeft = viewport.offsetLeft ?? 0;
+  const offsetTop = viewport.offsetTop ?? 0;
+  let minLeft = offsetLeft + hMargin;
+  let maxRight = offsetLeft + viewport.width - hMargin;
+  if (options.bounds) {
+    minLeft = Math.max(minLeft, options.bounds.left);
+    maxRight = Math.min(maxRight, options.bounds.right);
+  }
+  const room = Math.max(0, maxRight - minLeft);
+  let left: number;
+  let width: number;
+  if (options.preferredWidth === undefined) {
+    // Spanning panel: keep the part of the anchor that is actually on screen.
+    const visibleLeft = Math.max(anchor.left, minLeft);
+    const visibleRight = Math.min(anchor.right, maxRight);
+    if (visibleRight > visibleLeft) {
+      left = visibleLeft;
+      width = visibleRight - visibleLeft;
+    } else {
+      left = minLeft;
+      width = room;
+    }
+  } else {
+    width = Math.max(0, Math.min(options.preferredWidth, room));
+    const desiredLeft = options.align === "end" ? anchor.right - width : anchor.left;
+    left = Math.min(Math.max(desiredLeft, minLeft), Math.max(minLeft, maxRight - width));
+  }
+
+  // Vertical math runs in visual-viewport coordinates so an on-screen keyboard
+  // (which shrinks and pans the visual viewport) is accounted for.
+  const gap = options.gap ?? POPUP_GAP_PX;
+  const placement = computePopupPlacement(
+    anchor.top - offsetTop,
+    anchor.bottom - offsetTop,
+    viewport.height,
+    options.preferredMaxHeight ?? viewport.height,
+    { ...options, gap, prefer: options.prefer ?? "below" },
+  );
+  if (placement.side === "below") {
+    return { side: "below", top: anchor.bottom + gap, left, width, maxHeight: placement.maxHeight };
+  }
+  const layoutBottom = offsetTop + viewport.height;
+  return { side: "above", bottom: Math.max(0, layoutBottom - anchor.top + gap), left, width, maxHeight: placement.maxHeight };
+}
+
+/** Read the visible viewport in the form `computeAnchoredPanelRect` accepts. */
+export function readPanelViewport(): PanelViewport {
+  const visual = window.visualViewport;
+  return visual
+    ? { width: visual.width, height: visual.height, offsetTop: visual.offsetTop, offsetLeft: visual.offsetLeft }
+    : { width: window.innerWidth, height: window.innerHeight };
+}
+
+export function sameAnchoredPanelRect(a: AnchoredPanelRect | null, b: AnchoredPanelRect | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.side === b.side && a.top === b.top && a.bottom === b.bottom
+    && a.left === b.left && a.width === b.width && a.maxHeight === b.maxHeight;
+}

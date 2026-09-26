@@ -20,6 +20,7 @@ export function ProjectTrustDialog({
   return (
     <div
       role="presentation"
+      className="viewport-dialog-backdrop"
       style={{
         position: "fixed",
         inset: 0,
@@ -38,6 +39,7 @@ export function ProjectTrustDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="project-trust-title"
+        className="viewport-dialog"
         style={{
           width: 440,
           maxWidth: "100%",
@@ -45,7 +47,8 @@ export function ProjectTrustDialog({
           borderRadius: 8,
           background: "var(--bg-panel)",
           boxShadow: "0 12px 36px rgba(0,0,0,0.24)",
-          overflow: "hidden",
+          overflowX: "hidden",
+          overflowY: "auto",
         }}
       >
         <div style={{ display: "flex", gap: 12, padding: "18px 18px 14px" }}>

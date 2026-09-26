@@ -186,7 +186,9 @@ export function OmpUpdateIndicator() {
             bottom: panelPosition.bottom,
             zIndex: 700,
             width: panelPosition.width,
-            maxHeight: "min(72vh, 620px)",
+            // Anchored by its bottom edge: cap it to the room above so the
+            // header never runs past the top of the viewport.
+            maxHeight: `min(72vh, 620px, calc(var(--app-viewport-height, 100dvh) - ${panelPosition.bottom + 12}px))`,
             display: "flex",
             flexDirection: "column",
             overflow: "hidden",

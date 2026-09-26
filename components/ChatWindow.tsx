@@ -1078,6 +1078,7 @@ function ExtensionDialog({
         <div
           role="dialog"
           aria-modal="true"
+          className="viewport-dialog"
           aria-label={t("chat.agentQuestion")}
           style={{
             display: "flex",
@@ -1303,6 +1304,7 @@ function ExtensionDialog({
         <div
           role="dialog"
           aria-modal="true"
+          className="viewport-dialog"
           aria-labelledby={`plan-review-${request.id}`}
           style={{
             display: "flex",
@@ -1395,13 +1397,15 @@ function ExtensionDialog({
       <div
         role="dialog"
         aria-modal="true"
+        className="viewport-dialog"
         style={{
           width: "min(560px, 100%)",
           border: "1px solid var(--border)",
           borderRadius: 8,
           background: "var(--bg)",
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          overflow: "hidden",
+          overflowX: "hidden",
+          overflowY: "auto",
         }}
       >
         <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
@@ -1576,13 +1580,14 @@ function ExtensionCustomPanel({
       <div
         role="dialog"
         aria-modal="true"
+        className="viewport-dialog"
         onClick={(event) => {
           if (!(event.target as HTMLElement).closest("button")) inputRef.current?.focus();
         }}
         style={{
           position: "relative",
           width: "min(920px, 100%)",
-          maxHeight: "min(760px, calc(100vh - 40px))",
+          maxHeight: "min(760px, calc(100dvh - 40px))",
           border: "1px solid var(--border)",
           borderRadius: 8,
           background: "var(--bg)",
@@ -1660,7 +1665,7 @@ function ExtensionCustomPanel({
           style={{
             margin: 0,
             padding: 14,
-            maxHeight: "calc(min(760px, 100vh - 40px) - 48px)",
+            maxHeight: "calc(min(760px, 100dvh - 40px) - 48px)",
             overflow: "auto",
             background: "var(--bg-panel)",
             color: "var(--text)",

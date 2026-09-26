@@ -326,8 +326,8 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
   };
 
   return (
-    <div className={styles.backdrop} onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
-      <div className={styles.window} role="dialog" aria-modal="true" aria-label="Settings">
+    <div className={`${styles.backdrop} viewport-dialog-backdrop`} onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
+      <div className={`${styles.window} viewport-dialog`} role="dialog" aria-modal="true" aria-label="Settings">
         <aside className={styles.sidebar}>
           <div className={styles.brand}><div className={styles.eyebrow}>omp /settings</div><h1 className={styles.title}>Settings</h1><code className={styles.context} title={cwd ?? "Global configuration"}>{cwd ?? "Global configuration"}</code></div>
           <div className={styles.searchWrap}><svg className={styles.searchIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input className={styles.search} value={query} placeholder="Search /settings" onChange={(event) => setQuery(event.target.value)} /></div>
