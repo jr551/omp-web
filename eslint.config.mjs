@@ -5,7 +5,7 @@ const eslintConfig = [
   ...coreWebVitals,
   ...typescript,
   {
-    ignores: ["**/src-tauri/target", "**/src-tauri/gen"],
+    ignores: ["**/src-tauri/target", "**/src-tauri/gen", ".remember/**", ".playwright-mcp/**", "src-tauri/server/**"],
   },
   {
     rules: {
