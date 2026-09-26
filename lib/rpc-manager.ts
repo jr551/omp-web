@@ -35,7 +35,7 @@ import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
 import { PRESET_FULL } from "./tool-presets";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import type { SlashCommandInfo } from "./omp-types";
-import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./omp-types";
+import type { AdvisorStatusInfo, AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./omp-types";
 import { GoalModeController } from "./goal-mode";
 import type {
   ExtensionAskDialogResult,
@@ -96,6 +96,16 @@ const RUNNING_STATE_EVENT_TYPES = new Set([
   "auto_compaction_end",
   "compaction_start",
   "compaction_end",
+]);
+
+/** Events after which the advisor roster can have changed state. */
+const ADVISOR_STATUS_EVENT_TYPES = new Set([
+  "agent_start",
+  "agent_end",
+  "agent_settled",
+  "turn_end",
+  "advisor_yielded",
+  "advisor_cost_changed",
 ]);
 
 const IDLE_RESET_EVENT_TYPES = new Set([
@@ -276,6 +286,7 @@ export class AgentSessionWrapper {
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
+  private lastAdvisorStatusKey = "null";
   // Set while the handoff RPC is in flight so state polls and the running-set
   // stay honest during the long oneshot generation + session transition.
   private handoffRunning = false;
@@ -370,6 +381,24 @@ export class AgentSessionWrapper {
     });
   }
 
+  /** `null` when no advisor is configured, which is what hides the badge. */
+  private getAdvisorStatus(): AdvisorStatusInfo | null {
+    const overview = this.inner.getAdvisorStatusOverview?.();
+    if (!overview?.configured || overview.advisors.length === 0) return null;
+    return {
+      advisors: overview.advisors.map(({ name, status, yielded }) => ({ name, status, yielded })),
+      cost: this.inner.getAdvisorCost?.() ?? 0,
+    };
+  }
+
+  private emitAdvisorStatusIfChanged(): void {
+    const status = this.getAdvisorStatus();
+    const key = JSON.stringify(status);
+    if (key === this.lastAdvisorStatusKey) return;
+    this.lastAdvisorStatusKey = key;
+    this.emit({ type: "advisor_status", status });
+  }
+
   private getSubagentSnapshots(): SubagentSnapshot[] {
     for (const live of this.subagents.getSubagents()) {
       const snapshot = live as unknown as SubagentSnapshot;
@@ -435,6 +464,7 @@ export class AgentSessionWrapper {
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
       if (RUNNING_STATE_EVENT_TYPES.has(event.type)) notifyRunningChange();
+      if (ADVISOR_STATUS_EVENT_TYPES.has(event.type)) this.emitAdvisorStatusIfChanged();
       void this.goalMode.handleSessionEvent(event).catch((error) => {
         console.error(
           "[omp-web] goal mode failed to handle a session event:",
@@ -852,6 +882,7 @@ export class AgentSessionWrapper {
           extensionWidgets: this.getExtensionWidgets(),
           subagents: this.getSubagentSnapshots(),
           goal: this.goalMode.getStatus(),
+          advisor: this.getAdvisorStatus(),
         };
       }
       case "get_subagents":

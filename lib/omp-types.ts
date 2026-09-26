@@ -233,6 +233,9 @@ export interface AgentSessionLike {
   // half itself (see lib/goal-mode.ts) on top of the same GoalRuntime.
   readonly goalRuntime: GoalRuntimeLike;
   getGoalModeState?(): GoalModeState | undefined;
+  /** Same roster summary the TUI status line badges (omp 18.2+). */
+  getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly AdvisorStatusEntry[] };
+  getAdvisorCost?(): number;
   setGoalModeState?(state: GoalModeState | undefined): void;
   sendGoalModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
   promptCustomMessage(
@@ -270,6 +273,19 @@ export type GoalModeSession = Pick<
 >;
 
 /** Goal state as the browser sees it. */
+export interface AdvisorStatusEntry {
+  name: string;
+  /** omp's AdvisorRuntimeStatus: running | paused | quota_exhausted | error | no_model */
+  status: string;
+  /** Finished reviewing the yielded turn; no more comments until the next one. */
+  yielded: boolean;
+}
+
+export interface AdvisorStatusInfo {
+  advisors: AdvisorStatusEntry[];
+  cost: number;
+}
+
 export interface GoalStatusInfo {
   objective: string;
   status: string;

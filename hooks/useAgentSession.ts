@@ -17,7 +17,7 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { stripAnsi } from "@/lib/ansi";
 import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
-import type { ContextUsage, GoalStatusInfo, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
+import type { AdvisorStatusInfo, ContextUsage, GoalStatusInfo, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
 
 export interface SessionData {
@@ -90,6 +90,7 @@ type AgentStateResponse = {
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
   subagents?: SubagentSnapshot[];
   goal?: GoalStatusInfo | null;
+  advisor?: AdvisorStatusInfo | null;
 };
 
 interface GoalCommandResponse {
@@ -432,6 +433,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const completionScrollAllowedRef = useRef(true);
   const [autoFollowPaused, setAutoFollowPaused] = useState(false);
   const [goalStatus, setGoalStatus] = useState<GoalStatusInfo | null>(null);
+  const [advisorStatus, setAdvisorStatus] = useState<AdvisorStatusInfo | null>(null);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
   const ignoreProgrammaticScrollUntilRef = useRef(0);
@@ -1181,6 +1183,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
               if (d.state?.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, d.state?.subagents ?? []));
               if (d.state?.goal !== undefined) setGoalStatus(d.state.goal ?? null);
+              if (d.state?.advisor !== undefined) setAdvisorStatus(d.state.advisor ?? null);
               // Aborted turns can leave messages queued in pi (delivered with the
               // next turn); dead wrapper (no state) means the queue is gone.
               setQueuedMessages(normalizeQueuedMessages(d.state?.queuedMessages));
@@ -1190,6 +1193,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "goal_status":
         setGoalStatus((event.status as GoalStatusInfo | null | undefined) ?? null);
+        break;
+      case "advisor_status":
+        setAdvisorStatus((event.status as AdvisorStatusInfo | null | undefined) ?? null);
         break;
       case "agent_settled": {
         const agentWasActive = sdkAgentActiveRef.current;
@@ -2153,6 +2159,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(state.queuedMessages));
           if (state.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, state.subagents ?? []));
           if (state.goal !== undefined) setGoalStatus(state.goal ?? null);
+          if (state.advisor !== undefined) setAdvisorStatus(state.advisor ?? null);
         }
       });
     }
@@ -2268,6 +2275,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isNew,
     autoFollowPaused, resumeAutoFollow,
     goalStatus,
+    advisorStatus,
     // Refs
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
     // Actions

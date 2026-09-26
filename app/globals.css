@@ -1525,3 +1525,13 @@ span.linenumber {
     font-size: 16px !important;
   }
 }
+
+.omp-advisor-pulse {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .omp-advisor-pulse {
+    animation: none;
+  }
+}
