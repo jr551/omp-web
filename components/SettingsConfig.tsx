@@ -8,6 +8,7 @@ import { AccessConfig } from "./AccessConfig";
 import { SearchableSelect } from "./SearchableSelect";
 import { refreshOmpTheme, useTheme } from "@/hooks/useTheme";
 import { refreshDisplaySettings } from "@/hooks/useDisplaySettings";
+import { setEdgeRevealEnabled, useEdgeRevealEnabled } from "@/hooks/useEdgeReveal";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type {
   McpConfigResponse,
@@ -21,7 +22,7 @@ import type {
 } from "@/lib/settings-api";
 import styles from "./SettingsConfig.module.css";
 
-type SettingsSection = "models" | "themes" | "skills" | "plugins" | "mcp" | "access" | `settings:${string}`;
+type SettingsSection = "models" | "themes" | "interface" | "skills" | "plugins" | "mcp" | "access" | `settings:${string}`;
 
 interface SettingsConfigProps {
   cwd?: string | null;
@@ -35,6 +36,7 @@ interface SettingsConfigProps {
 const CORE_SECTIONS: Array<{ id: SettingsSection; label: string; icon: string; requiresCwd?: boolean }> = [
   { id: "models", label: "Models", icon: "model" },
   { id: "themes", label: "Themes", icon: "theme" },
+  { id: "interface", label: "Web UI", icon: "interaction" },
   { id: "skills", label: "Skills", icon: "skill", requiresCwd: true },
   { id: "plugins", label: "Plugins", icon: "plugin", requiresCwd: true },
   { id: "mcp", label: "MCP", icon: "mcp" },
@@ -340,8 +342,42 @@ export function SettingsConfig({ cwd, sessionId, initialSection = "models", onCl
           <div className={styles.closeRail}><button type="button" className={styles.closeButton} onClick={close}><span>Close settings</span><span aria-hidden="true">×</span></button></div>
         </aside>
         <main className={styles.content}>
-          {query.trim() ? renderGenericSettings() : section === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : section === "themes" ? renderThemeSection() : section === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : section === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : section === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : section === "access" ? <AccessConfig /> : renderGenericSettings()}
+          {query.trim() ? renderGenericSettings() : section === "models" ? <ModelsConfig cwd={cwd} embedded onClose={close} onModelsChanged={onModelsChanged} /> : section === "themes" ? renderThemeSection() : section === "interface" ? <WebInterfaceSettings /> : section === "skills" && cwd ? <SkillsConfig cwd={cwd} embedded onClose={close} /> : section === "plugins" && cwd ? <PluginsConfig cwd={cwd} sessionId={sessionId} embedded onClose={close} onReloaded={onReloaded} /> : section === "mcp" ? <McpSettings cwd={cwd} sessionId={sessionId} onReloaded={onReloaded} /> : section === "access" ? <AccessConfig /> : renderGenericSettings()}
         </main>
+      </div>
+    </div>
+  );
+}
+
+/** Preferences of this browser only (localStorage), not omp's shared config. */
+function WebInterfaceSettings() {
+  const edgeReveal = useEdgeRevealEnabled();
+  return (
+    <div className={styles.scrollContent}>
+      <header className={styles.contentHeader}>
+        <h2 className={styles.contentTitle}>Web UI</h2>
+        <p className={styles.contentDescription}>Preferences for this browser only. They are stored locally and do not change the shared omp configuration.</p>
+      </header>
+      <div className={styles.settingsBody}>
+        <section className={styles.group}>
+          <h3 className={styles.groupTitle}>Sidebars</h3>
+          <div className={styles.settingRow}>
+            <div>
+              <div className={styles.settingLabel}>Reveal sidebars on screen-edge hover</div>
+              <div className={styles.settingDescription}>Rest a mouse pointer at the left or right edge of the screen to open the session sidebar or the file panel. A panel opened this way closes again when the pointer leaves it, unless you click inside it or use its button. Desktop layout with a mouse or trackpad only.</div>
+            </div>
+            <div className={styles.settingControl}>
+              <button
+                type="button"
+                className={styles.switch}
+                data-on={edgeReveal}
+                aria-pressed={edgeReveal}
+                aria-label="Reveal sidebars on screen-edge hover"
+                onClick={() => setEdgeRevealEnabled(!edgeReveal)}
+              />
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );

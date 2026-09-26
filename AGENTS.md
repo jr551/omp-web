@@ -367,6 +367,22 @@ wires SSE in mount-only effects.
   `--app-viewport-height`, never `100vh`, when sizing a modal; embedded settings
   panes must not get the classes.
 
+### Screen-edge hover reveal
+- `hooks/useEdgeReveal.ts` opens the left sidebar / right file panel when a
+  mouse rests in a 6px strip at the screen edge for 300ms. Only for
+  `(hover: hover) and (pointer: fine)` and plain `mouse` pointer events, never
+  on the mobile layout, not while a button is held, a modal
+  (`[aria-modal="true"]`, Settings, project trust) is open, or the pointer is
+  over a control or scrollbar.
+- A hover-opened panel closes 400ms after the pointer leaves it (the resize
+  handle counts as inside). Clicking/typing inside it, grabbing its resize
+  handle, or pressing its toggle button pins it instead of closing it.
+- The timing rules are the pure `stepEdgeReveal()` state machine (unit-tested);
+  the hook only feeds it pointer samples and timer ticks and keeps everything
+  in refs, so pointer moves never re-render AppShell.
+- Preference: `localStorage["omp-edge-reveal"]` (`"false"` disables it, default
+  on), toggled from Settings -> Web UI.
+
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` as `omp-sound-enabled` and reuses one `AudioContext`.
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.

@@ -18,6 +18,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
+import { type EdgeSide, useEdgeReveal, useEdgeRevealEnabled } from "@/hooks/useEdgeReveal";
 import { observeViewportLayout } from "@/hooks/usePopupPlacement";
 import { copyText } from "@/lib/clipboard";
 import {
@@ -188,6 +189,27 @@ export function AppShell() {
     widthRef: rightPanelWidthRef,
   });
   const reclampSidebarWidth = sidebarResizer.reclampWidth;
+  // Screen-edge hover reveal (#53): desktop + fine pointer only, user toggle
+  // in Settings -> Web UI (localStorage "omp-edge-reveal").
+  const edgeRevealEnabled = useEdgeRevealEnabled();
+  const revealEdgePanel = useCallback((side: EdgeSide) => {
+    if (side === "left") setSidebarOpen(true);
+    else setRightPanelOpen(true);
+  }, []);
+  const concealEdgePanel = useCallback((side: EdgeSide) => {
+    if (side === "left") setSidebarOpen(false);
+    else setRightPanelOpen(false);
+  }, []);
+  const { pinIfRevealed: pinEdgeRevealedPanel } = useEdgeReveal({
+    active: edgeRevealEnabled && !isMobile,
+    suspended: settingsConfigOpen || projectTrustDialogOpen,
+    leftOpen: sidebarOpen,
+    rightOpen: rightPanelOpen,
+    leftPanelRef: sidebarResizer.panelRef,
+    rightPanelRef: rightPanelResizer.panelRef,
+    onReveal: revealEdgePanel,
+    onConceal: concealEdgePanel,
+  });
   const reclampRightPanelWidth = rightPanelResizer.reclampWidth;
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
@@ -277,8 +299,15 @@ export function AppShell() {
 
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) setActiveTopPanel(null);
+    // A hover-revealed sidebar is pinned by its button rather than closed.
+    else if (pinEdgeRevealedPanel("left")) return;
     setSidebarOpen((open) => !open);
-  }, [isMobile]);
+  }, [isMobile, pinEdgeRevealedPanel]);
+
+  const handleRightPanelToggle = useCallback(() => {
+    if (!isMobile && pinEdgeRevealedPanel("right")) return;
+    setRightPanelOpen((open) => !open);
+  }, [isMobile, pinEdgeRevealedPanel]);
 
   // Top-bar dropdowns are fixed-position, so they are measured against the
   // visible viewport rather than trusting the bar's own box: the bar can be
@@ -1864,7 +1893,7 @@ export function AppShell() {
     </div>
     {/* File panel toggle — always visible at top-right */}
     <button
-      onClick={() => setRightPanelOpen((v) => !v)}
+      onClick={handleRightPanelToggle}
        aria-controls="file-panel"
        aria-expanded={rightPanelOpen}
        title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
