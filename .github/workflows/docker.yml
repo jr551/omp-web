@@ -1,0 +1,86 @@
+name: Docker image
+
+# Builds the repository Dockerfile and pushes it to GHCR:
+#   ghcr.io/<owner>/omp-web:<version>   and   :latest
+#
+# Releases created by the automation (weekly-release.yml, update-omp.yml) use
+# GITHUB_TOKEN, and GITHUB_TOKEN-created releases do not fire `release` events,
+# so those workflows dispatch this one with the tag. A release published by a
+# person triggers it through `release: published`.
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (e.g. v0.4.5)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build and push to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Compute image names
+        id: meta
+        run: |
+          version="${TAG#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::unexpected tag $TAG"
+            exit 1
+          fi
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/omp-web"
+          {
+            echo "version=$version"
+            echo "revision=$(git rev-parse HEAD)"
+            echo "tags<<EOF"
+            echo "$image:$version"
+            echo "$image:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          # amd64 only: building Next.js under QEMU for arm64 takes far longer
+          # than the build itself. Add linux/arm64 here if it is needed.
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

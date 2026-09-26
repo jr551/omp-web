@@ -1,0 +1,255 @@
+name: Weekly dependency release
+
+# Every Monday: upgrade every dependency to its latest release (including the
+# @oh-my-pi/* SDK, kept on one shared `~X.Y.Z` range), then
+#   - CI green  -> bump the version, commit to main, tag vX.Y.Z and publish a
+#                  GitHub Release listing the upgraded packages, all in this run
+#                  (GITHUB_TOKEN pushes do not trigger other workflows, so nothing
+#                  here relies on a tag-push trigger; publish workflows are
+#                  dispatched explicitly and skip themselves on the fork).
+#   - CI red    -> run the OpenCode repair loop on automation/weekly-<date>. If the
+#                  repair passes CI a PR is opened; merging it releases (after CI
+#                  passes again on the merge commit). If the repair fails, an issue
+#                  labeled `automation-failure` is opened or refreshed.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    types:
+      - closed
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: weekly-release
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    name: Upgrade dependencies and release
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Upgrade all packages
+        id: upgrade
+        env:
+          CHANGES_FILE: ${{ runner.temp }}/upgrade-changes.md
+        run: bash .github/scripts/upgrade-deps.sh
+
+      - name: Run CI on the upgraded tree
+        id: ci
+        if: steps.upgrade.outputs.changed == 'true'
+        continue-on-error: true
+        shell: bash
+        run: bash .github/scripts/ci.sh 2>&1 | tee "$RUNNER_TEMP/weekly-ci.log"
+
+      - name: Commit the upgrade
+        if: steps.upgrade.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.upgrade.outputs.version }}
+          CI_OUTCOME: ${{ steps.ci.outcome }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ "$CI_OUTCOME" != "success" ]]; then
+            git checkout -b "automation/weekly-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
+          fi
+          git add package.json bun.lock
+          git commit -m "chore(release): v${VERSION} weekly dependency upgrade"
+
+      - name: Push, tag and release
+        if: steps.upgrade.outputs.changed == 'true' && steps.ci.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.upgrade.outputs.version }}
+          OMP_TO: ${{ steps.upgrade.outputs.omp_to }}
+          CHANGES_FILE: ${{ runner.temp }}/upgrade-changes.md
+          MAIN: ${{ github.event.repository.default_branch }}
+        run: |
+          tag="v${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::tag $tag already exists"
+            exit 1
+          fi
+          git tag -a "$tag" -m "$tag"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push "$remote" "HEAD:refs/heads/$MAIN" "refs/tags/$tag"
+          {
+            echo "Weekly dependency upgrade. oh-my-pi SDK: \`~${OMP_TO}\`."
+            echo
+            cat "$CHANGES_FILE"
+            echo
+            echo "Verified by \`.github/scripts/ci.sh\` (typecheck, lint, test, build)."
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "omp-web $tag" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          # Installable tarball (omp-web-X.Y.Z.tgz + omp-web.tgz) from the .next that ci.sh just built.
+          bash .github/scripts/release-assets.sh "$tag"
+          # Tag pushes and releases made with GITHUB_TOKEN do not trigger workflows;
+          # dispatch the publishers explicitly. npm/desktop skip themselves on a fork
+          # without npm trusted publishing / Tauri signing.
+          gh workflow run docker.yml --repo "$GITHUB_REPOSITORY" -f tag="$tag"
+          gh workflow run publish-npm.yml --repo "$GITHUB_REPOSITORY" --ref "$tag" -f ref="$tag" || true
+          gh workflow run publish-desktop.yml --repo "$GITHUB_REPOSITORY" --ref "$tag" || true
+
+      - name: Install OpenCode
+        if: steps.upgrade.outputs.changed == 'true' && steps.ci.outcome == 'failure'
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Repair with OpenCode
+        id: repair
+        if: steps.upgrade.outputs.changed == 'true' && steps.ci.outcome == 'failure'
+        continue-on-error: true
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.upgrade.outputs.version }}
+          CHANGES_FILE: ${{ runner.temp }}/upgrade-changes.md
+        run: |
+          BRANCH="$(git branch --show-current)"
+          export BRANCH
+          export PR_TITLE="chore(release): v${VERSION} weekly dependency upgrade"
+          export PR_BODY_FILE="$CHANGES_FILE"
+          export CONTEXT_FILE="$RUNNER_TEMP/repair-context.md"
+          {
+            cat "$CHANGES_FILE"
+            echo
+            echo "Tail of the failing CI log:"
+            tail -n 300 "$RUNNER_TEMP/weekly-ci.log"
+          } > "$CONTEXT_FILE"
+          bash .github/scripts/opencode-agent.sh "The weekly job upgraded every dependency to its latest release (see CONTEXT for the list) and .github/scripts/ci.sh now fails. Make omp-web work with the upgraded dependencies by fixing the source, configuration or tests properly. Keep every package at the upgraded version where possible; if a major upgrade cannot reasonably be adopted, you may lower that single package to its newest working version (keep all @oh-my-pi/* ranges identical ~X.Y.Z). Do not change the package.json \"version\" field."
+
+      - name: Run CI on the repair PR
+        if: steps.repair.outputs.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.repair.outputs.branch }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" || true
+
+      - name: Open or refresh the automation-failure issue
+        if: steps.upgrade.outputs.changed == 'true' && steps.ci.outcome == 'failure' && steps.repair.outputs.result != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.upgrade.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHANGES_FILE: ${{ runner.temp }}/upgrade-changes.md
+        run: |
+          gh label create automation-failure --repo "$GITHUB_REPOSITORY" --color B60205 \
+            --description "Scheduled automation failed and needs a human" 2>/dev/null || true
+          log="$RUNNER_TEMP/opencode-agent/last-ci.log"
+          if [[ ! -f "$log" ]]; then log="$RUNNER_TEMP/weekly-ci.log"; fi
+          {
+            echo "The weekly dependency upgrade to v${VERSION} fails CI and the OpenCode repair loop could not fix it."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            cat "$CHANGES_FILE"
+            echo
+            echo '<details><summary>CI log (tail)</summary>'
+            echo
+            echo '```'
+            tail -n 150 "$log"
+            echo '```'
+            echo '</details>'
+          } > "$RUNNER_TEMP/issue.md"
+          title="Weekly dependency release failed"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label automation-failure \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/issue.md"
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing: $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --label automation-failure --body-file "$RUNNER_TEMP/issue.md"
+          fi
+          exit 1
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-release-logs-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/weekly-ci.log
+            ${{ runner.temp }}/upgrade-changes.md
+            ${{ runner.temp }}/opencode-agent
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # A repaired weekly upgrade lands through a PR. When it is merged, verify the
+  # merge commit and release it.
+  release-merged:
+    name: Release a merged weekly upgrade
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'automation/weekly-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the merge commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: CI must pass before releasing
+        run: bash .github/scripts/ci.sh
+
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists"
+            exit 0
+          fi
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/notes.md"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$TARGET_SHA" \
+            --title "omp-web $tag" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          bash .github/scripts/release-assets.sh "$tag"
+          gh workflow run docker.yml --repo "$GITHUB_REPOSITORY" -f tag="$tag"
+          gh workflow run publish-npm.yml --repo "$GITHUB_REPOSITORY" --ref "$tag" -f ref="$tag" || true
+          gh workflow run publish-desktop.yml --repo "$GITHUB_REPOSITORY" --ref "$tag" || true

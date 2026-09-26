@@ -1,0 +1,268 @@
+name: OpenCode agent
+
+# The autonomous maintainer. A free OpenCode Zen model implements a task, the
+# change is verified with .github/scripts/ci.sh, and the result arrives as a pull
+# request against main (never a direct push). See docs/automation.md.
+#
+# Triggers:
+#   - workflow_dispatch: run `task`. With `branch`, repair that existing branch in
+#     place (used by update-omp.yml / weekly-release.yml for failing bot PRs).
+#   - issues labeled `opencode`: the issue title + body is the task; the PR says
+#     "Closes #N". Only people with triage access can add labels, which is the
+#     gate against prompt injection from arbitrary issue authors.
+#   - weekly schedule: maintenance sweep over this fork and the upstream
+#     repository (upstream is read-only: nothing is ever posted there).
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Task for the agent (plain English)
+        required: false
+        type: string
+        default: ""
+      branch:
+        description: Existing branch to repair in place (empty = new branch + PR)
+        required: false
+        type: string
+        default: ""
+      pr:
+        description: PR number of `branch` (repair mode; gets a comment and is marked ready)
+        required: false
+        type: string
+        default: ""
+      models:
+        description: Space-separated Zen model ids to try instead of the dynamic selection
+        required: false
+        type: string
+        default: ""
+  issues:
+    types:
+      - labeled
+  schedule:
+    - cron: "0 4 * * 3"
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: opencode-agent-${{ github.event.issue.number || inputs.branch || github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  agent:
+    name: Run the OpenCode agent
+    if: github.event_name != 'issues' || github.event.label.name == 'opencode'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      UPSTREAM_REPO: ddallabenetta/omp-web
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.branch || github.event.repository.default_branch }}
+          fetch-depth: 0
+          # The model runs shell commands in this checkout; keep the token out of .git/config.
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install OpenCode
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          "$HOME/.opencode/bin/opencode" --version
+
+      - name: Install dependencies
+        # Not frozen: a repair branch may carry a stale lockfile, which is part of what to fix.
+        continue-on-error: true
+        run: bun install
+
+      - name: Fetch upstream main (read-only)
+        continue-on-error: true
+        run: git fetch --no-tags "https://github.com/${UPSTREAM_REPO}.git" main:refs/remotes/upstream/main
+
+      - name: Build the task
+        id: task
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          INPUT_TASK: ${{ inputs.task }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          task_file="$RUNNER_TEMP/task.md"
+          context_file="$RUNNER_TEMP/context.md"
+          : > "$context_file"
+          mode="pr"
+          noop_ok=0
+          case "$EVENT" in
+            issues)
+              printf 'Resolve GitHub issue #%s of this repository.\n\nTitle: %s\n\n%s\n' \
+                "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_BODY" > "$task_file"
+              echo "issue=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+              printf 'title=%s\n' "$(printf 'Fix #%s: %s' "$ISSUE_NUMBER" "$ISSUE_TITLE" | head -c 200)" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              if [[ -z "$INPUT_TASK" ]]; then
+                echo "::error::workflow_dispatch needs a task"
+                exit 1
+              fi
+              printf '%s\n' "$INPUT_TASK" > "$task_file"
+              if [[ -n "$INPUT_BRANCH" ]]; then mode="repair"; fi
+              ;;
+            schedule)
+              noop_ok=1
+              echo "title=Weekly maintenance sweep" >> "$GITHUB_OUTPUT"
+              cat > "$task_file" <<'EOF'
+          Weekly maintenance sweep. This repository is an AI-maintained fork of
+          ddallabenetta/omp-web. Using the CONTEXT below (open issues and pull requests of
+          this fork and of the upstream repository, and upstream commits not yet in this
+          branch):
+          1. If upstream/main has commits that are not in HEAD and they are good changes,
+             merge upstream/main (git merge upstream/main) and resolve conflicts, keeping
+             this fork's automation. Changes under .github/ are discarded by the harness.
+          2. Then pick the single most valuable item that is not already addressed (by an
+             open PR in this fork, or by a commit on this branch): a bug report, a small
+             feature request, or a good upstream PR worth porting (you may read upstream
+             PRs with `git fetch https://github.com/ddallabenetta/omp-web.git pull/<N>/head`).
+             Implement it with tests.
+          3. If nothing is worth doing, change nothing.
+          Say in your final summary which upstream commits/PRs or issues you addressed.
+          EOF
+              {
+                echo "## Open issues in this fork ($GITHUB_REPOSITORY)"
+                gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 30 \
+                  --json number,title,labels,body \
+                  --jq '.[] | "- #\(.number) \(.title) [\([.labels[].name] | join(","))]\n  \(.body // "" | gsub("\\s+"; " ") | .[0:400])"' || true
+                echo
+                echo "## Open pull requests in this fork"
+                gh pr list -R "$GITHUB_REPOSITORY" --state open --limit 30 \
+                  --json number,title,headRefName --jq '.[] | "- #\(.number) \(.title) (\(.headRefName))"' || true
+                echo
+                echo "## Open issues upstream ($UPSTREAM_REPO, read-only)"
+                gh issue list -R "$UPSTREAM_REPO" --state open --limit 30 \
+                  --json number,title,body \
+                  --jq '.[] | "- upstream#\(.number) \(.title)\n  \(.body // "" | gsub("\\s+"; " ") | .[0:400])"' || true
+                echo
+                echo "## Open pull requests upstream ($UPSTREAM_REPO, read-only)"
+                gh pr list -R "$UPSTREAM_REPO" --state open --limit 30 \
+                  --json number,title,author,body \
+                  --jq '.[] | "- upstream PR #\(.number) \(.title) by \(.author.login)\n  \(.body // "" | gsub("\\s+"; " ") | .[0:400])"' || true
+                echo
+                echo "## Upstream commits not in this branch (git log HEAD..upstream/main)"
+                git log --oneline --no-merges HEAD..upstream/main 2>/dev/null | head -n 100 || true
+              } > "$context_file"
+              ;;
+            *)
+              echo "::error::unsupported event $EVENT"
+              exit 1
+              ;;
+          esac
+          {
+            echo "mode=$mode"
+            echo "noop_ok=$noop_ok"
+            echo "task_file=$task_file"
+            echo "context_file=$context_file"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run the agent loop
+        id: agent
+        continue-on-error: true
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.task.outputs.mode }}
+          BRANCH: ${{ inputs.branch }}
+          ISSUE_NUMBER: ${{ steps.task.outputs.issue }}
+          PR_TITLE: ${{ steps.task.outputs.title }}
+          TASK_FILE: ${{ steps.task.outputs.task_file }}
+          CONTEXT_FILE: ${{ steps.task.outputs.context_file }}
+          NOOP_OK: ${{ steps.task.outputs.noop_ok }}
+          MODELS: ${{ inputs.models }}
+        run: |
+          if [[ -z "$OPENCODE_API_KEY" ]]; then
+            echo "::warning::OPENCODE_API_KEY secret is not set; free models may refuse or rate-limit anonymous use."
+          fi
+          # Only an explicitly dispatched branch is repaired in place; otherwise
+          # opencode-agent.sh names a fresh opencode/agent-<run_id> branch.
+          if [[ "$MODE" != "repair" ]]; then unset BRANCH; fi
+          bash .github/scripts/opencode-agent.sh
+
+      - name: Upload agent logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: opencode-agent-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/opencode-agent
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ steps.agent.outputs.result }}
+          OUTCOME: ${{ steps.agent.outcome }}
+          PR_URL: ${{ steps.agent.outputs.pr_url }}
+          MODEL: ${{ steps.agent.outputs.model }}
+          MODE: ${{ steps.task.outputs.mode }}
+          ISSUE: ${{ steps.task.outputs.issue }}
+          REPAIR_BRANCH: ${{ inputs.branch }}
+          REPAIR_PR: ${{ inputs.pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          logs="$RUNNER_TEMP/opencode-agent"
+          if [[ -f "$logs/summary.md" ]]; then cat "$logs/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          tail_file="$RUNNER_TEMP/ci-tail.md"
+          {
+            echo '<details><summary>Last CI log (tail)</summary>'
+            echo
+            echo '```'
+            tail -n 80 "$logs/last-ci.log" 2>/dev/null || echo "(no CI log: no model produced changes)"
+            echo '```'
+            echo '</details>'
+          } > "$tail_file"
+
+          if [[ "$RESULT" == "success" ]]; then
+            if [[ "$MODE" == "repair" ]]; then
+              gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$REPAIR_BRANCH" || true
+              if [[ -n "$REPAIR_PR" ]]; then
+                gh pr comment "$REPAIR_PR" --repo "$GITHUB_REPOSITORY" \
+                  --body "OpenCode (\`$MODEL\`) repaired this branch and \`.github/scripts/ci.sh\` passes. Run: $RUN_URL"
+                gh pr ready "$REPAIR_PR" --repo "$GITHUB_REPOSITORY" || true
+              fi
+            else
+              branch="$(gh pr view "$PR_URL" --repo "$GITHUB_REPOSITORY" --json headRefName --jq .headRefName)"
+              gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch" || true
+              if [[ -n "$ISSUE" ]]; then
+                gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "OpenCode (\`$MODEL\`) opened $PR_URL for this issue. Run: $RUN_URL"
+              fi
+            fi
+          elif [[ "$RESULT" == "noop" ]]; then
+            echo "Agent found nothing to do."
+          else
+            body="$(printf 'The OpenCode agent could not produce a change that passes CI. Run: %s\n\n%s\n' "$RUN_URL" "$(cat "$tail_file")")"
+            if [[ -n "$ISSUE" ]]; then
+              gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$body"
+            elif [[ -n "$REPAIR_PR" ]]; then
+              gh pr comment "$REPAIR_PR" --repo "$GITHUB_REPOSITORY" --body "$body"
+            fi
+          fi
+          if [[ "$OUTCOME" != "success" ]]; then
+            echo "::error::OpenCode agent did not succeed"
+            exit 1
+          fi

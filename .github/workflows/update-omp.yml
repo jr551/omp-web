@@ -1,11 +1,16 @@
 name: Update omp dependency
 
-# The upstream repository cannot dispatch a workflow in this repository, so the
-# hourly check reads its latest stable release. workflow_dispatch is useful for
+# The upstream repository cannot dispatch a workflow in this repository, so a
+# daily check reads its latest stable release. workflow_dispatch is useful for
 # validating a release immediately after it is published.
+#
+# Fork notes (jr551/omp-web): verification is .github/scripts/ci.sh; when it fails
+# the draft PR is handed to the OpenCode agent (opencode-agent.yml) to repair the
+# branch in place. Branches pushed with GITHUB_TOKEN do not trigger ci.yml, so this
+# workflow dispatches it explicitly. publish-npm.yml is skipped on the fork.
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "17 5 * * *"
   workflow_dispatch:
   pull_request:
     types:
@@ -27,12 +32,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -43,11 +48,11 @@ jobs:
           # Must satisfy engines.bun (>=1.3.14): the omp SDK is published as
           # TypeScript importing `bun:` builtins, so verifying the bump on an
           # older Bun proves nothing about the release this repo actually ships.
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
 
       - name: Read latest upstream release
         id: release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ github.token }}
           script: |
@@ -96,7 +101,7 @@ jobs:
             sleep 30
           done
           # Upstream routinely tags minutes before the npm publish lands. The
-          # hourly schedule is the retry, so a miss here is a "come back later",
+          # daily schedule is the retry, so a miss here is a "come back later",
           # not a failure worth reddening every run until someone notices.
           echo "published=false" >> "$GITHUB_OUTPUT"
           echo "::notice::omp $OMP_VERSION is tagged upstream but not on npm yet; the next scheduled run will retry."
@@ -177,10 +182,7 @@ jobs:
         id: verify
         if: steps.plan.outputs.proceed == 'true'
         continue-on-error: true
-        run: |
-          bun install --frozen-lockfile
-          bun run typecheck
-          bun test
+        run: bash .github/scripts/ci.sh
 
       - name: Report the verification outcome
         id: report
@@ -191,10 +193,10 @@ jobs:
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           if [[ "$VERIFY_OUTCOME" == "success" ]]; then
-            note="The workflow refreshed \`bun.lock\`, then ran \`bun run typecheck\` and \`bun test\` against the new SDK. Both passed."
+            note="The workflow refreshed \`bun.lock\`, then ran \`.github/scripts/ci.sh\` (typecheck, lint, test, build) against the new SDK. It passed."
             echo "draft=false" >> "$GITHUB_OUTPUT"
           else
-            note=":warning: \`bun run typecheck\` or \`bun test\` failed against omp \`$OMP_VERSION\`, so this PR is a **draft**: the release needs source changes in omp-web before it can merge. The failing output is in [the workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+            note=":warning: \`.github/scripts/ci.sh\` failed against omp \`$OMP_VERSION\`, so this PR is a **draft**: the release needs source changes in omp-web before it can merge. The failing output is in [the workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}). The OpenCode agent has been dispatched to repair this branch."
             echo "draft=true" >> "$GITHUB_OUTPUT"
           fi
           {
@@ -205,8 +207,9 @@ jobs:
           echo "$note" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open or update the dependency PR
+        id: cpr
         if: steps.plan.outputs.proceed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ github.token }}
           branch: automation/omp-${{ steps.release.outputs.version }}
@@ -223,6 +226,30 @@ jobs:
 
             ${{ steps.report.outputs.note }}
 
+      # GITHUB_TOKEN pushes do not trigger ci.yml; dispatch it so the PR head has a check.
+      - name: Run CI on the dependency branch
+        if: steps.plan.outputs.proceed == 'true' && steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: automation/omp-${{ steps.release.outputs.version }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+
+      - name: Hand a failing bump to the OpenCode agent
+        if: >-
+          steps.plan.outputs.proceed == 'true' &&
+          steps.verify.outcome == 'failure' &&
+          steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: automation/omp-${{ steps.release.outputs.version }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+          OMP_VERSION: ${{ steps.release.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          task="The @oh-my-pi/* packages were bumped to ~${OMP_VERSION} on this branch and .github/scripts/ci.sh now fails (see ${RUN_URL}). Make omp-web compatible with omp ${OMP_VERSION}: fix typecheck, test and build failures in the source (never by pinning the old omp version back or weakening tests). Keep package.json dependency ranges and version as they are."
+          gh workflow run opencode-agent.yml --repo "$GITHUB_REPOSITORY" \
+            -f task="$task" -f branch="$BRANCH" -f pr="$PR_NUMBER"
+
   release:
     name: Release omp-web
     if: >-
@@ -234,10 +261,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out merged main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      # Build before the release exists, so a broken build never leaves a
+      # release without its installable tarball.
+      - name: Build the release package
+        run: |
+          bun install --frozen-lockfile
+          bun run build
 
       - name: Read release metadata
         id: metadata
@@ -296,6 +340,21 @@ jobs:
             --title "omp-web $tag" \
             --notes "Updated oh-my-pi to v${OMP_VERSION}."
           echo "created=true" >> "$GITHUB_OUTPUT"
+
+      # The fork cannot publish `omp-web` to npm, so the release carries the package.
+      - name: Attach the installable tarball
+        if: steps.github_release.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.package_version }}
+        run: bash .github/scripts/release-assets.sh "v${PACKAGE_VERSION}"
+
+      - name: Build the Docker image for the release
+        if: steps.github_release.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ steps.metadata.outputs.package_version }}
+        run: gh workflow run docker.yml --repo "$GITHUB_REPOSITORY" -f tag="$RELEASE_TAG"
 
       - name: Start npm publish for the release tag
         if: steps.github_release.outputs.created == 'true'
