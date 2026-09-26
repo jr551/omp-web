@@ -132,7 +132,7 @@ components/
   FileExplorer.tsx    file tree inside sidebar
   FileIcons.tsx       file icon helpers
   FileViewer.tsx      file content in a tab
-  TabBar.tsx          tab bar (Chat + open file tabs)
+  TabBar.tsx          file tab bar of the right panel
 
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic
@@ -165,6 +165,21 @@ would open a second SQLite handle on `~/.omp/agent/agent.db` and split
 
 Anything that mutates credentials or `models.yml` must call
 `invalidateOmpRuntime()` as well as `invalidateModelsCache()`.
+
+### Settings are registry handles (`lib/omp-settings.ts`)
+omp 18.2 removed the path-keyed `settings.get("a.b")` / `settings.set()` /
+`getGroup()` API and `config/settings-schema`; every setting is now a typed
+`Setting` handle from `config/registry`. omp-web still addresses settings by
+dotted path (the browser sends paths, `/api/settings` is generated from the
+schema), so `lib/omp-settings.ts` is the only place that maps a path to a
+handle (`getSetting` / `setSetting` / `isSettingConfigured` plus the schema
+helpers). Do not call registry `lookup()` elsewhere. Tests that need settings
+use `Settings.isolated({ "goal.enabled": true, ... })`, not a `{ get }` stub.
+
+Likewise `AuthStorage` became namespaced: `credentials.{list,set,remove}`,
+`keys.source()` (replaces `getCredentialOrigin` / `hasAuth`) and
+`oauth.login()`. Theme, thinking-level and goal-tool types moved to
+`@oh-my-pi/pi-tui` (`theme/theme`, `thinking`, `tools/goal`).
 
 ### Model roles are the model selector
 omp assigns a model per scope of work (`default`, `smol`, `slow`, `vision`,
@@ -303,6 +318,39 @@ TypeScript half type-checks against — keep the two in sync.
   the recovery code is printed on the server's stdout, never returned in the
   response.
 
+### Tab switching performance
+Switching file tabs used to swap the `filePath` of a single `FileViewer`, which
+reset it to "Loading…", re-fetched the file, re-opened its watcher and re-ran
+Prism over the whole file; the AppShell render it came from also re-rendered the
+whole chat, re-running the markdown pipeline for every final answer. Keep these
+in place:
+- Every open tab is its own `FileViewer`, keyed by tab id, inside
+  `<Activity mode="visible|hidden">` (React 19.2). Hidden tabs keep their state
+  and DOM, but their effects are unmounted — which closes their file watchers,
+  so N open tabs never hold N SSE connections against the browser's
+  per-origin limit.
+- Because Activity re-runs effects when a tab is shown again, `FileViewer`
+  effects must tell "same path, re-shown" from "new path": the load effect
+  only revalidates quietly (`loadedPathRef`), and one-shot defaults (preview
+  for markdown/HTML, auto-diff) remember what they were applied for. Hiding a
+  scroll container with `display: none` loses its offset, so
+  `usePreservedScroll` puts it back.
+- Highlighted source, markdown preview and diff output are `useMemo`'d on the
+  file content; `setData` / `setGitDiff` / the selected line range keep the old
+  object when nothing changed so those memos hold.
+- `ChatWindow`, `SessionSidebar`, `FileViewer` and `MarkdownBody` are
+  `memo()`'d. That only works while AppShell passes stable callbacks — wrap new
+  handler props in `useCallback`, never an inline arrow.
+- `ChatWindow` builds the grouped transcript in one `useMemo` (streaming chunks
+  live in `streamState` and do not invalidate it), and the process/answer
+  messages split out of a final assistant message are cached per message
+  object (`getFinalAssistantParts`). A fresh object per render defeats
+  `MessageView`'s memo and re-parses every answer's markdown.
+
+The chat is not a tab and is never hidden: selecting another session still
+remounts `ChatWindow` (`key={sessionKey}`), because `useAgentSession` loads and
+wires SSE in mount-only effects.
+
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` as `omp-sound-enabled` and reuses one `AudioContext`.
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
@@ -311,9 +359,12 @@ TypeScript half type-checks against — keep the two in sync.
 - `/api/sessions/[id]/export` delegates to omp's export helper, then patches recursive tree helpers in the generated HTML to iterative versions so very deep linear sessions do not overflow the browser call stack.
 
 ### HTTP proxying
-Bun's `fetch` reads `HTTP_PROXY` / `HTTPS_PROXY` **once at process start** and
-never proxies loopback — which is what local providers need. It ignores
-`NO_PROXY`. `lib/http-dispatcher.ts` is therefore a no-op under Bun; its undici
+Bun's `fetch` reads `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` **once at process
+start**. Bun ≤1.3 never proxied loopback; Bun 1.4 does, which breaks local
+providers (ollama, lm-studio, llama.cpp) behind a proxy. The launchers
+(`withLoopbackNoProxy()` in `bin/runtime.js`, `loopback_no_proxy()` in
+`src-tauri/src/main.rs`) therefore append `localhost,127.0.0.1,::1` to
+`NO_PROXY` before spawning Bun. `lib/http-dispatcher.ts` is therefore a no-op under Bun; its undici
 `EnvHttpProxyAgent` path only exists for a dev server run on Node, because Bun
 resolves `undici` to its own shim where `setGlobalDispatcher` does not affect
 `fetch` and `install` does not exist.

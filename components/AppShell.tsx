@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { Activity, useState, useCallback, useRef, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -53,6 +53,40 @@ type AutoNameStatus =
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
+
+type OpenFileHandler = (
+  filePath: string,
+  fileName: string,
+  options?: { sourceSessionId?: string | null; modeHint?: "diff" },
+) => void;
+
+// Binds a tab's source session into a stable onOpenFile, so the memoized
+// FileViewer inside is not re-rendered by every AppShell state change.
+function FileTabPanel({ tab, cwd, gitRefreshKey, onMentionLines, onAtMention, onOpenFile }: {
+  tab: Tab;
+  cwd?: string;
+  gitRefreshKey: number;
+  onMentionLines?: (relativePath: string, startLine: number, endLine: number) => void;
+  onAtMention: (relativePath: string, isDir: boolean) => void;
+  onOpenFile: OpenFileHandler;
+}) {
+  const sourceSessionId = tab.sourceSessionId;
+  const handleOpenFile = useCallback((filePath: string) => {
+    onOpenFile(filePath, getFileName(filePath), { sourceSessionId });
+  }, [onOpenFile, sourceSessionId]);
+  return (
+    <FileViewer
+      filePath={tab.filePath}
+      cwd={cwd}
+      sourceSessionId={sourceSessionId}
+      gitRefreshKey={gitRefreshKey}
+      initialDisplayMode={tab.initialDisplayMode}
+      onMentionLines={onMentionLines}
+      onAtMention={onAtMention}
+      onOpenFile={handleOpenFile}
+    />
+  );
+}
 
 export function AppShell() {
   const router = useRouter();
@@ -1763,24 +1797,23 @@ export function AppShell() {
 
         </div>
 
-        {/* File content */}
+        {/* File content — every open tab stays mounted; inactive ones are
+            hidden by <Activity>, so switching tabs does not re-fetch or
+            re-highlight the file. See "Tab switching performance" in AGENTS.md. */}
         <div style={{ flex: 1, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-          {activeFileTab?.filePath ? (
-            <FileViewer
-              filePath={activeFileTab.filePath}
-              cwd={activeCwd ?? undefined}
-              sourceSessionId={activeFileTab.sourceSessionId}
-              gitRefreshKey={explorerRefreshKey}
-              initialDisplayMode={activeFileTab.initialDisplayMode}
-              onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
-              onAtMention={handleAtMention}
-              onOpenFile={(filePath) => handleOpenFile(
-                filePath,
-                getFileName(filePath),
-                { sourceSessionId: activeFileTab.sourceSessionId },
-              )}
-            />
-          ) : (
+          {fileTabs.map((tab) => (
+            <Activity key={tab.id} mode={tab.id === activeFileTab?.id ? "visible" : "hidden"}>
+              <FileTabPanel
+                tab={tab}
+                cwd={activeCwd ?? undefined}
+                gitRefreshKey={explorerRefreshKey}
+                onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
+                onAtMention={handleAtMention}
+                onOpenFile={handleOpenFile}
+              />
+            </Activity>
+          ))}
+          {!activeFileTab && (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
                {translate("files.noneOpen")}
             </div>

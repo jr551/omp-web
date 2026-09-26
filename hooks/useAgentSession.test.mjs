@@ -250,6 +250,10 @@ test("renders the transcript with omp's hideThinkingBlock setting", () => {
   // Turn grouping has to agree with what MessageView renders, or a message
   // made only of thinking blocks leaves an empty row behind.
   assert.match(chatWindowSource, /hasDisplayableProcessMessage\(messages\[processIdx\], displayOptions\)/);
-  assert.match(chatWindowSource, /splitFinalAssistantBlocks\(finalAssistant, displayOptions\)/);
+  // The split is cached per message (getFinalAssistantParts) but must still
+  // be keyed on, and computed with, the same display options.
+  assert.match(chatWindowSource, /getFinalAssistantParts\(finalAssistant, displayOptions\)/);
+  assert.match(chatWindowSource, /cached\.hideThinking === hideThinking/);
+  assert.match(chatWindowSource, /splitFinalAssistantBlocks\(message, options\)/);
   assert.match(chatWindowSource, /findFinalAssistantIndex\(messages, userIdx, endIdx, displayOptions\)/);
 });

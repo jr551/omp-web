@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type MouseEvent } from "react";
+import { memo, useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type MouseEvent, type RefObject } from "react";
 import {
   Prism as SyntaxHighlighter,
   createElement as renderSyntaxNode,
@@ -84,6 +84,38 @@ type SourceCodeRendererProps = Parameters<NonNullable<SyntaxHighlighterProps["re
 interface SelectedLineRange {
   startLine: number;
   endLine: number;
+}
+
+function sameLineRange(a: SelectedLineRange | null, b: SelectedLineRange | null): boolean {
+  return a === b || (a !== null && b !== null && a.startLine === b.startLine && a.endLine === b.endLine);
+}
+
+function sameFileData(a: FileData | null, b: FileData): boolean {
+  return a !== null && a.content === b.content && a.language === b.language && a.size === b.size;
+}
+
+/**
+ * Each open file tab stays mounted inside an `<Activity>` boundary (see
+ * AppShell). Hiding it applies `display: none`, which drops the scroll offset,
+ * and unmounts effects, so the offset is tracked here and put back when the
+ * tab is shown again. `ready` flips once the scroll container exists.
+ */
+function usePreservedScroll(ref: RefObject<HTMLElement | null>, ready: boolean) {
+  const offsetRef = useRef<{ top: number; left: number } | null>(null);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!ready || !element) return;
+    const saved = offsetRef.current;
+    if (saved) {
+      element.scrollTop = saved.top;
+      element.scrollLeft = saved.left;
+    }
+    const handleScroll = () => {
+      offsetRef.current = { top: element.scrollTop, left: element.scrollLeft };
+    };
+    element.addEventListener("scroll", handleScroll, { passive: true });
+    return () => element.removeEventListener("scroll", handleScroll);
+  }, [ready, ref]);
 }
 
 function MentionIcon() {
@@ -281,7 +313,7 @@ function diffLines(patch: string): DiffLine[] {
 
 function DiffView({ patch }: { patch: string }) {
   const { t } = useI18n();
-  const diff = diffLines(patch);
+  const diff = useMemo(() => diffLines(patch), [patch]);
 
   const hasChanges = diff.some((l) => l.type !== "unchanged");
   if (!hasChanges) {
@@ -425,12 +457,17 @@ function ImageViewer({ filePath, cwd, sourceSessionId }: Props) {
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
+  // Re-run on reveal of a hidden tab keeps what is shown; reset on a new path.
+  const loadedPathRef = useRef<string | null>(null);
   useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setNaturalSize(null);
-    setError(null);
     setWatching(false);
+    if (loadedPathRef.current !== filePath) {
+      loadedPathRef.current = filePath;
+      setBust(0);
+      setSize(null);
+      setNaturalSize(null);
+      setError(null);
+    }
 
     if (esRef.current) {
       esRef.current.close();
@@ -556,15 +593,28 @@ function AudioViewer({ filePath, cwd, sourceSessionId }: Props) {
   const [duration, setDuration] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
+  // A tab hidden by <Activity> keeps its DOM, so playback would continue in
+  // the background; effect cleanup runs on hide, which is where it stops.
+  useEffect(() => () => {
+    // Read at cleanup time: the element is keyed by `src` and remounts.
+    audioRef.current?.pause();
+  }, []);
+
+  // Re-run on reveal of a hidden tab keeps what is shown; reset on a new path.
+  const loadedPathRef = useRef<string | null>(null);
   useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setDuration(null);
-    setError(null);
     setWatching(false);
+    if (loadedPathRef.current !== filePath) {
+      loadedPathRef.current = filePath;
+      setBust(0);
+      setSize(null);
+      setDuration(null);
+      setError(null);
+    }
 
     if (esRef.current) {
       esRef.current.close();
@@ -652,6 +702,7 @@ function AudioViewer({ filePath, cwd, sourceSessionId }: Props) {
           )}
           <audio
             key={src}
+            ref={audioRef}
             controls
             preload="metadata"
             src={src}
@@ -679,11 +730,16 @@ function DocumentViewer({ filePath, cwd, sourceSessionId }: Props) {
     ? getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined)
     : getFileApiUrl(filePath, "preview", sourceSessionId, bust ? { v: bust } : undefined);
 
+  // Re-run on reveal of a hidden tab keeps what is shown; reset on a new path.
+  const loadedPathRef = useRef<string | null>(null);
   useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setError(null);
     setWatching(false);
+    if (loadedPathRef.current !== filePath) {
+      loadedPathRef.current = filePath;
+      setBust(0);
+      setSize(null);
+      setError(null);
+    }
 
     if (esRef.current) {
       esRef.current.close();
@@ -787,7 +843,9 @@ function DocumentViewer({ filePath, cwd, sourceSessionId }: Props) {
   );
 }
 
-export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, onAtMention, gitRefreshKey, initialDisplayMode }: Props) {
+// memo: one FileViewer is kept mounted per open tab, and AppShell re-renders
+// all of them whenever its own state changes. Callers pass stable callbacks.
+export const FileViewer = memo(function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, onAtMention, gitRefreshKey, initialDisplayMode }: Props) {
   if (isImagePath(filePath)) {
     return <ImageViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} />;
   }
@@ -798,7 +856,7 @@ export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMenti
     return <DocumentViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} />;
   }
   return <TextFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} onAtMention={onAtMention} gitRefreshKey={gitRefreshKey} initialDisplayMode={initialDisplayMode} />;
-}
+});
 
 function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, onAtMention, gitRefreshKey, initialDisplayMode }: Props) {
   const { isDark } = useTheme();
@@ -825,7 +883,9 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
           return null;
         }
         setError(null);
-        setData(d);
+        // Keep the previous object when nothing changed so the memoized
+        // highlight/markdown output below is reused instead of rebuilt.
+        setData((previous) => (sameFileData(previous, d) ? previous : d));
         return d;
       })
       .catch((e) => {
@@ -848,7 +908,12 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       const response = await fetch(`/api/git/diff?${params.toString()}`);
       const next = await response.json() as GitFileDiffResponse & { error?: string };
       if (requestId !== gitDiffRequestRef.current) return;
-      setGitDiff(response.ok && next.supported && typeof next.patch === "string" ? next : null);
+      const nextDiff = response.ok && next.supported && typeof next.patch === "string" ? next : null;
+      setGitDiff((previous) => (
+        previous && nextDiff && previous.patch === nextDiff.patch && previous.status === nextDiff.status
+          ? previous
+          : nextDiff
+      ));
     } catch {
       if (requestId === gitDiffRequestRef.current) setGitDiff(null);
     } finally {
@@ -856,22 +921,33 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     }
   }, [cwd]);
 
+  // Path whose content is currently in state. This effect re-runs both when
+  // the path changes and when a hidden tab is shown again (Activity remounts
+  // effects); only the former resets the view, the latter revalidates quietly.
+  const loadedPathRef = useRef<string | null>(null);
+
   // Initial load + SSE watch setup
   useEffect(() => {
-    setLoading(true);
-    setError(null);
-    setData(null);
-    setGitDiff(null);
-    setDisplayMode("source");
-    setWrapLines(false);
+    const revalidating = loadedPathRef.current === filePath;
+    loadedPathRef.current = filePath;
     setWatching(false);
+    if (!revalidating) {
+      setLoading(true);
+      setError(null);
+      setData(null);
+      setGitDiff(null);
+      setDisplayMode("source");
+      setWrapLines(false);
+    }
 
     if (esRef.current) {
       esRef.current.close();
       esRef.current = null;
     }
 
-    fetchContent(filePath).finally(() => setLoading(false));
+    // A hidden tab has no watcher, so re-read on reveal in case it changed.
+    if (revalidating) void fetchContent(filePath);
+    else fetchContent(filePath).finally(() => setLoading(false));
 
     // Set up SSE watch
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
@@ -904,14 +980,20 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     void fetchGitDiff(filePath);
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
+  // Remembers what the preview default was applied for, so revealing a hidden
+  // tab (which re-runs effects) does not undo the user's own mode choice.
+  const autoPreviewKeyRef = useRef<string | null>(null);
   useEffect(() => {
     // HTML gets the same rendered-first treatment as markdown: a generated page
     // is usually more useful viewed than read as source. Both have a preview
     // mode already; the source tab stays one click away.
+    const key = `${filePath}\0${data?.language ?? ""}\0${initialDisplayMode ?? ""}`;
+    if (autoPreviewKeyRef.current === key) return;
+    autoPreviewKeyRef.current = key;
     if ((data?.language === "markdown" || data?.language === "html") && initialDisplayMode !== "diff") {
       setDisplayMode("preview");
     }
-  }, [data?.language, initialDisplayMode]);
+  }, [data?.language, filePath, initialDisplayMode]);
 
   const hasGitDiff = gitDiff?.supported === true && typeof gitDiff.patch === "string";
   const isDeletedDiff = hasGitDiff && gitDiff.status === "deleted";
@@ -931,7 +1013,10 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   // diff view once the git diff has resolved. We do this after the diff loads
   // rather than at mount so files without a diff never flash an empty diff view.
   const autoDiffAppliedRef = useRef(false);
+  const autoDiffPathRef = useRef(filePath);
   useEffect(() => {
+    if (autoDiffPathRef.current === filePath) return;
+    autoDiffPathRef.current = filePath;
     autoDiffAppliedRef.current = false;
   }, [filePath]);
   useEffect(() => {
@@ -954,11 +1039,12 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   useEffect(() => {
     const updateSelectedLineRange = () => {
       const root = contentRef.current;
-      setSelectedLineRange(
-        onMentionLines && displayMode === "source" && root
-          ? getSelectedSourceLineRange(root, window.getSelection())
-          : null,
-      );
+      const next = onMentionLines && displayMode === "source" && root
+        ? getSelectedSourceLineRange(root, window.getSelection())
+        : null;
+      // selectionchange fires on every caret move; bail out unless the range
+      // actually changed, or the whole file re-renders per keystroke/drag.
+      setSelectedLineRange((previous) => (sameLineRange(previous, next) ? previous : next));
     };
 
     updateSelectedLineRange();
@@ -998,7 +1084,132 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [displayMode, mentionLineRange, onMentionLines]);
 
-  if (loading || (initialDisplayMode === "diff" && gitDiffLoading && !data)) {
+  const isLoadingView = loading || (initialDisplayMode === "diff" && gitDiffLoading && !data);
+  const showsContent = !isLoadingView && !(error && !isDeletedDiff) && Boolean(data || isDeletedDiff);
+  usePreservedScroll(contentRef, showsContent);
+
+  const language = data?.language ?? "text";
+  const content = data?.content ?? "";
+  const markdownDirectory = getFileDirectory(filePath);
+  const effectiveDisplayMode = isDeletedDiff ? "diff" : displayMode;
+  const showSource = effectiveDisplayMode !== "diff" && effectiveDisplayMode !== "preview";
+  const showMarkdownPreview = language === "markdown" && effectiveDisplayMode === "preview";
+  const lineCount = useMemo(() => content.split("\n").length, [content]);
+
+  // Prism highlighting and the markdown pipeline are the expensive part of
+  // this view and depend only on the file, so build them once per content or
+  // option change instead of on every render (selection, watcher status,
+  // parent updates, re-showing a hidden tab).
+  const sourceView = useMemo(() => showSource ? (
+    <SyntaxHighlighter
+      className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
+      language={language === "text" ? "plaintext" : language}
+      style={isDark ? vscDarkPlus : vs}
+      showLineNumbers
+      lineNumberStyle={{
+        ...FILE_LINE_NUMBER_STYLE,
+      }}
+      customStyle={{
+        margin: 0,
+        padding: 0,
+        border: 0,
+        background: "var(--bg)",
+        ...FILE_CODE_STYLE,
+        width: wrapLines ? "100%" : "max-content",
+        minWidth: "100%",
+        minHeight: "100%",
+        overflow: "visible",
+      }}
+      codeTagProps={{
+        style: {
+          fontFamily: "var(--font-mono)",
+          overflowWrap: wrapLines ? "anywhere" : "normal",
+        },
+      }}
+      renderer={(rendererProps) => (
+        <SourceCodeRenderer {...rendererProps} wrapLines={wrapLines} />
+      )}
+      wrapLongLines={wrapLines}
+    >
+      {content}
+    </SyntaxHighlighter>
+  ) : null, [content, isDark, language, showSource, wrapLines]);
+
+  const markdownView = useMemo(() => showMarkdownPreview ? (
+    <div
+      className="markdown-body markdown-file-preview"
+      style={{ padding: "24px 32px" }}
+    >
+      {frontmatter?.data && <FrontmatterCard data={frontmatter.data} />}
+      <ReactMarkdown
+        remarkPlugins={markdownPreviewRemarkPlugins}
+        rehypePlugins={markdownPreviewRehypePlugins}
+        components={{
+          code({ className, children, ...props }) {
+            const lang = className?.replace("language-", "").toLowerCase() ?? "";
+            const raw = String(children);
+            const isBlock = className?.includes("language-") || raw.includes("\n");
+            if (isBlock) {
+              if (lang === "mermaid") {
+                return <MermaidBlock code={raw.replace(/\n$/, "")} defaultPreview />;
+              }
+              return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
+            }
+            return (
+              <code className={className} {...props}>
+                {children}
+              </code>
+            );
+          },
+          pre({ children }) {
+            // Render the code block directly — CodeBlock provides its own wrapping.
+            // For non-mermaid blocks, pass through to default pre rendering.
+            return <>{children}</>;
+          },
+          a({ href, children, ...props }) {
+            delete props.node;
+            const linkedFile = onOpenFile
+              ? resolveLocalFileHref(href, markdownDirectory, cwd ?? markdownDirectory)
+              : null;
+            if (!linkedFile || !onOpenFile) {
+              return <a href={href} {...props}>{children}</a>;
+            }
+
+            const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+              if (event.defaultPrevented || event.button !== 0) return;
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              event.preventDefault();
+              onOpenFile(linkedFile);
+            };
+
+            return <a href={href} {...props} onClick={handleClick}>{children}</a>;
+          },
+          img({ src, alt, ...props }) {
+            delete props.node;
+            const imagePath = typeof src === "string"
+              ? resolveLocalFileHref(src, markdownDirectory, cwd ?? markdownDirectory)
+              : null;
+            const imageSrc = imagePath
+              ? getFileApiUrl(imagePath, "read", sourceSessionId)
+              : src;
+            // Dynamic local paths are served directly by the file API.
+            // eslint-disable-next-line @next/next/no-img-element
+            return <img src={imageSrc} alt={alt ?? ""} loading="lazy" {...props} />;
+          },
+        }}
+      >
+        {markdownPreview}
+      </ReactMarkdown>
+    </div>
+  ) : null, [cwd, frontmatter, markdownDirectory, markdownPreview, onOpenFile, showMarkdownPreview, sourceSessionId]);
+
+  const gitPatch = gitDiff?.patch;
+  const diffView = useMemo(
+    () => (effectiveDisplayMode === "diff" && typeof gitPatch === "string" ? <DiffView patch={gitPatch} /> : null),
+    [effectiveDisplayMode, gitPatch],
+  );
+
+  if (isLoadingView) {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13 }}>
         {t("i18n.loading")}
@@ -1016,14 +1227,9 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
 
   if (!data && !isDeletedDiff) return null;
 
-  const language = data?.language ?? "text";
-  const content = data?.content ?? "";
   const isHtml = language === "html";
   const isMarkdown = language === "markdown";
   const hasPreview = isHtml || isMarkdown;
-  const markdownDirectory = getFileDirectory(filePath);
-  const lines = content.split("\n");
-  const effectiveDisplayMode = isDeletedDiff ? "diff" : displayMode;
   const displayModes: DisplayMode[] = isDeletedDiff
     ? ["diff"]
     : [
@@ -1033,7 +1239,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       ];
   const metadata = isDeletedDiff
     ? t("files.deleted")
-    : `${language} · ${lines.length} lines · ${formatSize(data!.size)}`;
+    : `${language} · ${lineCount} lines · ${formatSize(data!.size)}`;
 
   return (
     <div className="file-viewer-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -1152,7 +1358,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       {/* Content area */}
       <div ref={contentRef} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
         {effectiveDisplayMode === "diff" && hasGitDiff ? (
-          <DiffView patch={gitDiff.patch!} />
+          diffView
         ) : isHtml && effectiveDisplayMode === "preview" ? (
           <iframe
             srcDoc={content}
@@ -1161,104 +1367,9 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
              title={t("i18n.htmlPreview")}
           />
         ) : isMarkdown && effectiveDisplayMode === "preview" ? (
-          <div
-            className="markdown-body markdown-file-preview"
-            style={{ padding: "24px 32px" }}
-          >
-            {frontmatter?.data && <FrontmatterCard data={frontmatter.data} />}
-            <ReactMarkdown
-              remarkPlugins={markdownPreviewRemarkPlugins}
-              rehypePlugins={markdownPreviewRehypePlugins}
-              components={{
-                code({ className, children, ...props }) {
-                  const lang = className?.replace("language-", "").toLowerCase() ?? "";
-                  const raw = String(children);
-                  const isBlock = className?.includes("language-") || raw.includes("\n");
-                  if (isBlock) {
-                    if (lang === "mermaid") {
-                      return <MermaidBlock code={raw.replace(/\n$/, "")} defaultPreview />;
-                    }
-                    return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
-                  }
-                  return (
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
-                  );
-                },
-                pre({ children }) {
-                  // Render the code block directly — CodeBlock provides its own wrapping.
-                  // For non-mermaid blocks, pass through to default pre rendering.
-                  return <>{children}</>;
-                },
-                a({ href, children, ...props }) {
-                  delete props.node;
-                  const linkedFile = onOpenFile
-                    ? resolveLocalFileHref(href, markdownDirectory, cwd ?? markdownDirectory)
-                    : null;
-                  if (!linkedFile || !onOpenFile) {
-                    return <a href={href} {...props}>{children}</a>;
-                  }
-
-                  const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-                    if (event.defaultPrevented || event.button !== 0) return;
-                    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                    event.preventDefault();
-                    onOpenFile(linkedFile);
-                  };
-
-                  return <a href={href} {...props} onClick={handleClick}>{children}</a>;
-                },
-                img({ src, alt, ...props }) {
-                  delete props.node;
-                  const imagePath = typeof src === "string"
-                    ? resolveLocalFileHref(src, markdownDirectory, cwd ?? markdownDirectory)
-                    : null;
-                  const imageSrc = imagePath
-                    ? getFileApiUrl(imagePath, "read", sourceSessionId)
-                    : src;
-                  // Dynamic local paths are served directly by the file API.
-                  // eslint-disable-next-line @next/next/no-img-element
-                  return <img src={imageSrc} alt={alt ?? ""} loading="lazy" {...props} />;
-                },
-              }}
-            >
-              {markdownPreview}
-            </ReactMarkdown>
-          </div>
+          markdownView
         ) : (
-          <SyntaxHighlighter
-            className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
-            language={language === "text" ? "plaintext" : language}
-            style={isDark ? vscDarkPlus : vs}
-            showLineNumbers
-            lineNumberStyle={{
-              ...FILE_LINE_NUMBER_STYLE,
-            }}
-            customStyle={{
-              margin: 0,
-              padding: 0,
-              border: 0,
-              background: "var(--bg)",
-              ...FILE_CODE_STYLE,
-              width: wrapLines ? "100%" : "max-content",
-              minWidth: "100%",
-              minHeight: "100%",
-              overflow: "visible",
-            }}
-            codeTagProps={{
-              style: {
-                fontFamily: "var(--font-mono)",
-                overflowWrap: wrapLines ? "anywhere" : "normal",
-              },
-            }}
-            renderer={(rendererProps) => (
-              <SourceCodeRenderer {...rendererProps} wrapLines={wrapLines} />
-            )}
-            wrapLongLines={wrapLines}
-          >
-            {content}
-          </SyntaxHighlighter>
+          sourceView
         )}
       </div>
     </div>

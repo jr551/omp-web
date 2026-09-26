@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, type MouseEvent } from "react";
+import { memo, useMemo, type MouseEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
@@ -15,7 +15,11 @@ interface MarkdownBodyProps {
   onOpenFile?: (filePath: string) => void;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
+// memo: the markdown pipeline (remark/rehype/KaTeX) re-runs on every render,
+// and parents re-render for reasons unrelated to the text (message hover,
+// copy feedback, tool results arriving). All props are strings/booleans or a
+// stable callback, so a shallow compare is enough to skip the re-parse.
+export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
   const components = useMemo<Components>(() => ({
@@ -99,4 +103,4 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       </ReactMarkdown>
     </div>
   );
-}
+});
