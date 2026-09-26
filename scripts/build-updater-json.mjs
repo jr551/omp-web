@@ -38,7 +38,7 @@ const run = (cmd, args, opts = {}) => {
   return res.stdout.trim();
 };
 
-const release = JSON.parse(run("gh", ["release", "view", tag, "--json", "assets,published_at,name"]));
+const release = JSON.parse(run("gh", ["release", "view", tag, "--json", "assets,publishedAt,name"]));
 const version = tag.replace(/^v/, "");
 const assets = release.assets.filter((a) => !a.name.endsWith(".sig"));
 
@@ -61,10 +61,10 @@ const platforms = {};
 try {
   for (const [key, asset] of candidates) {
     const local = join(tmp, asset.name);
-    run("curl", ["-fsSL", "-o", local, asset.browser_download_url]);
+    run("curl", ["-fsSL", "-o", local, asset.url]);
     // tauri signer sign prints the base64 Ed25519 signature; keep only the
     // base64 line (the CLI may prefix it with explanatory output).
-    const out = run("bun", ["run", "tauri", "signer", "sign", "-f", local], {
+    const out = run("bun", ["run", "tauri", "signer", "sign", local], {
       env: { ...process.env },
     });
     const signature = out
@@ -75,7 +75,7 @@ try {
       console.error(`could not parse signature from signer output for ${asset.name}:\n${out}`);
       process.exit(1);
     }
-    platforms[key] = { url: asset.browser_download_url, signature };
+    platforms[key] = { url: asset.url, signature };
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true });
@@ -84,7 +84,7 @@ try {
 const latest = {
   version,
   notes: release.name,
-  pub_date: release.published_at,
+  pub_date: release.publishedAt,
   platforms,
 };
 
