@@ -39,7 +39,8 @@ export type RoutineTrigger =
       command: string;
       guardTimeoutMs: number;
       expectOutputMatches?: string;
-    };
+    }
+  | { type: "webhook"; token: string };
 
 export interface Routine {
   id: string;
@@ -51,6 +52,8 @@ export interface Routine {
   modelId?: string;
   maxExecutionMs: number;
   enabled: boolean;
+  /** Optional outgoing webhook to ask the user a question during a headless run. */
+  askWebhookUrl?: string;
   createdAt: string;
   updatedAt: string;
   lastRun?: RoutineRun;
@@ -60,6 +63,8 @@ export interface Routine {
 /** A routine plus live scheduler state, as returned by the API. */
 export interface RoutineWithStatus extends Routine {
   running: boolean;
+  /** Full incoming webhook URL for webhook-triggered routines (never the token alone elsewhere). */
+  webhookUrl?: string;
 }
 
 export interface RoutinesListResponse {

@@ -7,7 +7,8 @@ import {
   listRoutines,
   validateRoutineFields,
 } from "@/lib/routine-store";
-import { toRoutineWithStatus as withStatus } from "@/lib/routine-scheduler";
+import { toRoutineWithStatus } from "@/lib/routine-scheduler";
+import { resolveExternalBaseUrl } from "@/lib/omp-web-config";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,8 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
   try {
-    return NextResponse.json({ routines: listRoutines().map(withStatus) });
+    const baseUrl = resolveExternalBaseUrl(req);
+    return NextResponse.json({ routines: listRoutines().map((routine) => toRoutineWithStatus(routine, baseUrl)) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
@@ -49,7 +51,7 @@ export async function POST(req: Request) {
 
     const routine = createRoutine(validated.value);
     allowFileRoot(cwd);
-    return NextResponse.json({ routine: withStatus(routine) }, { status: 201 });
+    return NextResponse.json({ routine: toRoutineWithStatus(routine, resolveExternalBaseUrl(req)) }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

@@ -483,6 +483,32 @@ omp-web can run a prompt in a project unattended, on a schedule or a condition.
   pinned to the top of the sidebar with a muted `--warning` folder icon.
 - i18n keys live under `routines.*` in `lib/i18n/messages/{en,zh-CN}.ts`.
 
+**Webhooks (incoming + outgoing ask).**
+- **External URL** (`lib/omp-web-config.ts`): omp-web's own config store at
+  `<agentDir>/omp-web-config.json` (globalThis-cached). `resolveExternalBaseUrl(request)`
+  returns the configured value, else auto-detects from `X-Forwarded-Proto/Host`,
+  else `Host` — used only to *render* webhook links, never for security. Served by
+  `GET/PUT /api/omp-web-config` and edited in the Routines modal.
+- **Incoming webhook trigger** `{ type: "webhook", token }`: the token is a
+  high-entropy base64url capability (`lib/webhook-tokens.ts`, `tokensEqual` is
+  constant-time). `POST /api/routines/hook/[token]` triggers the run (concurrency
+  caps honored, 202 with the routine id, 404 for unknown/revoked, 409 disabled);
+  an optional body is appended to the prompt as context. Webhook routines are
+  **not** fired by the scheduler tick — only by the hook endpoint. Regenerate via
+  `PATCH { regenerateToken: true }`.
+- **Outgoing ask webhook** (`lib/routine-ask.ts`): a headless run has no browser,
+  so blocking extension-UI questions would hang. The runner
+  (`lib/routine-runner.ts`) intercepts blocking UI requests: with an
+  `askWebhookUrl` it POSTs `{ routineId, runId, question, respondUrl, expiresAt }`
+  and waits; without one (or on timeout/complex dialogs) it safely **declines**
+  (`{ cancelled: true }`) so the run never hangs, bounded by `maxExecutionMs`.
+  `respondUrl` is `<externalBaseUrl>/api/routines/respond/[token]` — a single-use,
+  expiring, constant-time capability that answers **that one question only**. The
+  ask/wait/respond/expire logic is injectable (fetch + token) and unit-tested.
+- Both `/api/routines/hook/*` and `/api/routines/respond/*` are **allow-listed in
+  `proxy.ts`** ahead of the host/cross-site + password checks (the token is the
+  whole authorization, and tunnels reach them from arbitrary hosts).
+
 ## omp Session File Format
 
 Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`

@@ -154,7 +154,8 @@ function saveStringSet(key: string, values: Set<string>): void {
 
 function routineTriggerSummary(trigger: RoutineTrigger, t: (key: string, params?: Record<string, string | number>) => string): string {
   if (trigger.type === "cron") return describeCron(trigger.schedule);
-  return t("routines.conditionSummary", { minutes: Math.round(trigger.intervalMs / 60_000) });
+  if (trigger.type === "guard") return t("routines.conditionSummary", { minutes: Math.round(trigger.intervalMs / 60_000) });
+  return t("routines.webhookSummary");
 }
 
 interface RoutineSidebarRowProps {

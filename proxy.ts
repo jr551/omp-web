@@ -32,6 +32,15 @@ const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // Webhook capability endpoints are reachable from anywhere (tunnels front
+  // omp-web), so they bypass BOTH the host/cross-site allow-list and the
+  // password lock. The unguessable, constant-time-compared token in the path is
+  // the entire authorization; the handlers never expose ambient authority.
+  if (pathname.startsWith("/api/routines/hook/") || pathname.startsWith("/api/routines/respond/")) {
+    return NextResponse.next();
+  }
+
   const isApiRequest = pathname === "/api" || pathname.startsWith("/api/");
   const isTrustedRequest = isApiRequest
     ? isApiRequestAllowed(request)

@@ -6,10 +6,12 @@ import {
   deleteRoutine,
   getRoutine,
   patchRoutine,
+  regenerateWebhookToken,
   updateRoutine,
   validateRoutineFields,
 } from "@/lib/routine-store";
-import { toRoutineWithStatus as withStatus } from "@/lib/routine-scheduler";
+import { toRoutineWithStatus } from "@/lib/routine-scheduler";
+import { resolveExternalBaseUrl } from "@/lib/omp-web-config";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +23,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const { id } = await params;
   const routine = getRoutine(id);
   if (!routine) return NextResponse.json({ error: "Routine not found" }, { status: 404 });
-  return NextResponse.json({ routine: withStatus(routine) });
+  return NextResponse.json({ routine: toRoutineWithStatus(routine, resolveExternalBaseUrl(req)) });
 }
 
 async function authorizeCwd(cwd: string): Promise<string | null> {
@@ -53,13 +55,13 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
     const routine = updateRoutine(id, validated.value);
     allowFileRoot(validated.value.cwd);
-    return NextResponse.json({ routine: withStatus(routine) });
+    return NextResponse.json({ routine: toRoutineWithStatus(routine, resolveExternalBaseUrl(req)) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }
 
-// PATCH /api/routines/[id] — partial update (currently the enabled toggle).
+// PATCH /api/routines/[id] — partial update (enabled toggle or token regen).
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
@@ -70,12 +72,16 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const { id } = await params;
   try {
     if (!getRoutine(id)) return NextResponse.json({ error: "Routine not found" }, { status: 404 });
-    const body = await req.json() as { enabled?: unknown };
+    const body = await req.json() as { enabled?: unknown; regenerateToken?: unknown };
+    if (body.regenerateToken === true) {
+      const routine = regenerateWebhookToken(id);
+      return NextResponse.json({ routine: toRoutineWithStatus(routine, resolveExternalBaseUrl(req)) });
+    }
     if (typeof body.enabled !== "boolean") {
       return NextResponse.json({ error: "enabled (boolean) is required" }, { status: 400 });
     }
     const routine = patchRoutine(id, { enabled: body.enabled });
-    return NextResponse.json({ routine: withStatus(routine) });
+    return NextResponse.json({ routine: toRoutineWithStatus(routine, resolveExternalBaseUrl(req)) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

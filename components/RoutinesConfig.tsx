@@ -31,7 +31,7 @@ interface ModelsResponse {
   error?: string;
 }
 
-type TriggerType = "cron" | "guard";
+type TriggerType = "cron" | "guard" | "webhook";
 
 interface Draft {
   name: string;
@@ -46,6 +46,7 @@ interface Draft {
   model: string; // "provider:modelId" or "" for project default
   maxExecutionMs: number;
   enabled: boolean;
+  askWebhookUrl: string;
 }
 
 const EXECUTION_PRESETS_MIN = [5, 15, 30, 60, 120];
@@ -65,40 +66,50 @@ function blankDraft(cwd: string): Draft {
     model: "",
     maxExecutionMs: DEFAULT_EXECUTION_MS,
     enabled: true,
+    askWebhookUrl: "",
   };
 }
 
 function draftFromRoutine(routine: Routine): Draft {
   const base = blankDraft(routine.cwd);
   const model = routine.provider && routine.modelId ? `${routine.provider}:${routine.modelId}` : "";
-  if (routine.trigger.type === "cron") {
-    return { ...base, name: routine.name, prompt: routine.prompt, model, maxExecutionMs: routine.maxExecutionMs, enabled: routine.enabled, triggerType: "cron", schedule: routine.trigger.schedule };
-  }
-  return {
+  const common = {
     ...base,
     name: routine.name,
     prompt: routine.prompt,
     model,
     maxExecutionMs: routine.maxExecutionMs,
     enabled: routine.enabled,
-    triggerType: "guard",
-    intervalMs: routine.trigger.intervalMs,
-    command: routine.trigger.command,
-    expectOutputMatches: routine.trigger.expectOutputMatches ?? "",
-    guardTimeoutMs: routine.trigger.guardTimeoutMs,
+    askWebhookUrl: routine.askWebhookUrl ?? "",
   };
+  if (routine.trigger.type === "cron") {
+    return { ...common, triggerType: "cron", schedule: routine.trigger.schedule };
+  }
+  if (routine.trigger.type === "guard") {
+    return {
+      ...common,
+      triggerType: "guard",
+      intervalMs: routine.trigger.intervalMs,
+      command: routine.trigger.command,
+      expectOutputMatches: routine.trigger.expectOutputMatches ?? "",
+      guardTimeoutMs: routine.trigger.guardTimeoutMs,
+    };
+  }
+  return { ...common, triggerType: "webhook" };
 }
 
 function draftToBody(draft: Draft): Record<string, unknown> {
   const trigger: RoutineTrigger = draft.triggerType === "cron"
     ? { type: "cron", schedule: draft.schedule.trim() }
-    : {
-        type: "guard",
-        intervalMs: draft.intervalMs,
-        command: draft.command,
-        guardTimeoutMs: draft.guardTimeoutMs,
-        ...(draft.expectOutputMatches.trim() ? { expectOutputMatches: draft.expectOutputMatches.trim() } : {}),
-      };
+    : draft.triggerType === "guard"
+      ? {
+          type: "guard",
+          intervalMs: draft.intervalMs,
+          command: draft.command,
+          guardTimeoutMs: draft.guardTimeoutMs,
+          ...(draft.expectOutputMatches.trim() ? { expectOutputMatches: draft.expectOutputMatches.trim() } : {}),
+        }
+      : { type: "webhook", token: "" };
   const [provider, modelId] = draft.model ? draft.model.split(":") : [undefined, undefined];
   return {
     name: draft.name.trim(),
@@ -108,6 +119,7 @@ function draftToBody(draft: Draft): Record<string, unknown> {
     maxExecutionMs: draft.maxExecutionMs,
     enabled: draft.enabled,
     ...(provider && modelId ? { provider, modelId } : {}),
+    ...(draft.askWebhookUrl.trim() ? { askWebhookUrl: draft.askWebhookUrl.trim() } : {}),
   };
 }
 
@@ -122,6 +134,9 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
   const [dirPickerOpen, setDirPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [externalUrl, setExternalUrl] = useState("");
+  const [resolvedBaseUrl, setResolvedBaseUrl] = useState("");
+  const [externalUrlSaving, setExternalUrlSaving] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadRoutines = useCallback(async () => {
@@ -249,6 +264,54 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
     }
   }, [selectedId, loadRoutines, t]);
 
+  const loadConfig = useCallback(async () => {
+    try {
+      const response = await fetch("/api/omp-web-config", { cache: "no-store" });
+      const data = await response.json() as { externalBaseUrl?: string; resolvedBaseUrl?: string };
+      setExternalUrl(data.externalBaseUrl ?? "");
+      setResolvedBaseUrl(data.resolvedBaseUrl ?? "");
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { void loadConfig(); }, [loadConfig]);
+
+  const saveExternalUrl = useCallback(async (value: string) => {
+    setExternalUrlSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/omp-web-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ externalBaseUrl: value }),
+      });
+      const data = await response.json() as { externalBaseUrl?: string; resolvedBaseUrl?: string; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setExternalUrl(data.externalBaseUrl ?? "");
+      setResolvedBaseUrl(data.resolvedBaseUrl ?? "");
+      await loadRoutines();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setExternalUrlSaving(false);
+    }
+  }, [loadRoutines]);
+
+  const regenerateToken = useCallback(async () => {
+    if (selectedId === "new" || !selectedId) return;
+    try {
+      const response = await fetch(`/api/routines/${selectedId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ regenerateToken: true }),
+      });
+      const data = await response.json() as { routine?: RoutineWithStatus; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      await loadRoutines();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, [selectedId, loadRoutines]);
+
   const runNow = useCallback(async () => {
     if (selectedId === "new" || !selectedId) return;
     try {
@@ -270,11 +333,15 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
   const cronValid = draft?.triggerType === "cron" ? isValidCron(draft.schedule) : true;
   const cronSummary = draft?.triggerType === "cron" ? describeCron(draft.schedule) : "";
 
-  const canSave = Boolean(
-    draft && draft.name.trim() && draft.cwd && draft.prompt.trim()
-    && (draft.triggerType === "cron" ? cronValid : draft.command.trim())
-    && !saving,
-  );
+  const triggerValid = !draft
+    ? false
+    : draft.triggerType === "cron"
+      ? cronValid
+      : draft.triggerType === "guard"
+        ? Boolean(draft.command.trim())
+        : true;
+  const canSave = Boolean(draft && draft.name.trim() && draft.cwd && draft.prompt.trim() && triggerValid && !saving);
+  const selectedRoutine = selectedId && selectedId !== "new" ? routines.find((routine) => routine.id === selectedId) : undefined;
 
   return (
     <div className={`${styles.backdrop} viewport-dialog-backdrop`} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -284,6 +351,19 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
             <div className={styles.eyebrow}>omp-web</div>
             <h1 className={styles.title}>{t("routines.title")}</h1>
             <p className={styles.subtitle}>{t("routines.subtitle")}</p>
+            <div className={styles.field} style={{ marginTop: 12 }}>
+              <label className={styles.fieldLabel}>{t("routines.externalUrl")}</label>
+              <input
+                className={styles.textInput}
+                value={externalUrl}
+                placeholder={resolvedBaseUrl || "https://omp.example.com"}
+                spellCheck={false}
+                disabled={externalUrlSaving}
+                onChange={(event) => setExternalUrl(event.target.value)}
+                onBlur={(event) => void saveExternalUrl(event.target.value)}
+              />
+              <span className={styles.fieldHint}>{t("routines.externalUrlHint")}</span>
+            </div>
           </div>
           <div className={styles.list}>
             {routines.length === 0 && <div className={styles.listEmpty}>{t("routines.empty")}</div>}
@@ -363,6 +443,7 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
                   <div className={styles.toggleGroup}>
                     <button type="button" className={styles.toggleButton} data-active={draft.triggerType === "cron"} onClick={() => patchDraft({ triggerType: "cron" })}>{t("routines.triggerCron")}</button>
                     <button type="button" className={styles.toggleButton} data-active={draft.triggerType === "guard"} onClick={() => patchDraft({ triggerType: "guard" })}>{t("routines.triggerCondition")}</button>
+                    <button type="button" className={styles.toggleButton} data-active={draft.triggerType === "webhook"} onClick={() => patchDraft({ triggerType: "webhook" })}>{t("routines.triggerWebhook")}</button>
                   </div>
                 </div>
 
@@ -372,7 +453,7 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
                     <input className={styles.textInput} value={draft.schedule} placeholder={t("routines.schedulePlaceholder")} spellCheck={false} onChange={(event) => patchDraft({ schedule: event.target.value })} />
                     <div className={styles.cronPreview} data-error={!cronValid}>{cronSummary}</div>
                   </div>
-                ) : (
+                ) : draft.triggerType === "guard" ? (
                   <>
                     <div className={styles.fieldRow}>
                       <div className={styles.field}>
@@ -398,6 +479,21 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
                       <input className={styles.textInput} value={draft.expectOutputMatches} spellCheck={false} placeholder="\bOK\b" onChange={(event) => patchDraft({ expectOutputMatches: event.target.value })} />
                     </div>
                   </>
+                ) : (
+                  <div className={styles.webhookBox}>
+                    <span className={styles.fieldHint}>{t("routines.webhookHint")}</span>
+                    {selectedRoutine?.webhookUrl ? (
+                      <>
+                        <div className={styles.webhookUrl}>
+                          <code title={selectedRoutine.webhookUrl}>{selectedRoutine.webhookUrl}</code>
+                          <button type="button" className={styles.secondaryButton} onClick={() => void navigator.clipboard?.writeText(selectedRoutine.webhookUrl ?? "")}>{t("routines.copy")}</button>
+                        </div>
+                        <button type="button" className={styles.secondaryButton} style={{ alignSelf: "flex-start" }} onClick={() => void regenerateToken()}>{t("routines.regenerate")}</button>
+                      </>
+                    ) : (
+                      <span className={styles.fieldHint}>{t("routines.webhookAfterSave")}</span>
+                    )}
+                  </div>
                 )}
 
                 <div className={styles.field}>
@@ -421,6 +517,12 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
                       {EXECUTION_PRESETS_MIN.map((min) => <option key={min} value={min * 60_000}>{min < 60 ? t("routines.minutes", { count: min }) : t("routines.hours", { count: min / 60 })}</option>)}
                     </select>
                   </div>
+                </div>
+
+                <div className={styles.field}>
+                  <label className={styles.fieldLabel}>{t("routines.askWebhook")}</label>
+                  <input className={styles.textInput} value={draft.askWebhookUrl} spellCheck={false} placeholder="https://hooks.example.com/ask" onChange={(event) => patchDraft({ askWebhookUrl: event.target.value })} />
+                  <span className={styles.fieldHint}>{t("routines.askWebhookHint")}</span>
                 </div>
 
                 <div className={styles.switchRow}>
@@ -499,7 +601,8 @@ function formatTimestamp(iso: string, locale: string): string {
 
 function triggerSummary(trigger: RoutineTrigger, t: (key: string, params?: Record<string, string | number>) => string): string {
   if (trigger.type === "cron") return describeCron(trigger.schedule);
-  return t("routines.conditionSummary", { minutes: Math.round(trigger.intervalMs / 60_000) });
+  if (trigger.type === "guard") return t("routines.conditionSummary", { minutes: Math.round(trigger.intervalMs / 60_000) });
+  return t("routines.webhookSummary");
 }
 
 function dotStatus(routine: RoutineWithStatus): string {

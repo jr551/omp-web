@@ -110,7 +110,7 @@ export async function runSchedulerTick(deps: SchedulerDeps, state: SchedulerStat
       if (state.running.size >= deps.concurrency) continue; // global cap; retry next tick
       state.lastTriggeredMinute.set(routine.id, key);
       track(state, startRun(deps, state, routine, now));
-    } else {
+    } else if (routine.trigger.type === "guard") {
       if (state.guardChecking.has(routine.id)) continue; // an eval is already in flight
       const last = state.lastGuardCheck.get(routine.id) ?? 0;
       if (now.getTime() - last < routine.trigger.intervalMs) continue;
@@ -154,7 +154,7 @@ async function startRun(deps: SchedulerDeps, state: SchedulerState, routine: Rou
       ...run,
       finishedAt: deps.now().toISOString(),
       status: "success",
-      summary: summarize(outcome.summary),
+      summary: summarize(outcome.note ? `[${outcome.note}] ${outcome.summary}` : outcome.summary),
       ...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
     });
   } catch (error) {
@@ -231,7 +231,10 @@ export const defaultRunner: RoutineRunner = (routine, signal) =>
     {
       cwd: routine.cwd,
       prompt: routine.prompt,
+      routineId: routine.id,
+      maxExecutionMs: routine.maxExecutionMs,
       ...(routine.provider && routine.modelId ? { provider: routine.provider, modelId: routine.modelId } : {}),
+      ...(routine.askWebhookUrl ? { askWebhookUrl: routine.askWebhookUrl } : {}),
     },
     signal,
   );
@@ -297,12 +300,16 @@ export function tickNow(): Promise<void> {
  * Respects the single-run-per-routine guard but not the global cap, so an
  * operator-requested run is never silently dropped.
  */
-export async function runRoutineNow(routineId: string): Promise<void> {
+export async function runRoutineNow(routineId: string, options: { extraContext?: string } = {}): Promise<void> {
   if (!globalThis.__ompRoutineScheduler) startRoutineScheduler();
   const singleton = globalThis.__ompRoutineScheduler!;
-  const routine = singleton.deps.getRoutine(routineId);
-  if (!routine) throw new Error(`Routine not found: ${routineId}`);
+  const stored = singleton.deps.getRoutine(routineId);
+  if (!stored) throw new Error(`Routine not found: ${routineId}`);
   if (singleton.state.running.has(routineId)) return; // already running
+  // Append caller-supplied context (e.g. a webhook body) without mutating the store.
+  const routine: Routine = options.extraContext
+    ? { ...stored, prompt: `${stored.prompt}\n\n---\nTrigger context:\n${options.extraContext}` }
+    : stored;
   const state = singleton.state;
   state.running.add(routineId);
   const runId = randomUUID();
@@ -322,7 +329,7 @@ export async function runRoutineNow(routineId: string): Promise<void> {
         ...run,
         finishedAt: singleton.deps.now().toISOString(),
         status: "success",
-        summary: summarize(outcome.summary),
+        summary: summarize(outcome.note ? `[${outcome.note}] ${outcome.summary}` : outcome.summary),
         ...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}),
       });
     } catch (error) {
@@ -355,6 +362,10 @@ export function getRunningRoutineIds(): string[] {
 }
 
 /** Serialize a routine with its live running state, as the API returns it. */
-export function toRoutineWithStatus(routine: Routine): RoutineWithStatus {
-  return { ...routine, running: isRoutineRunning(routine.id) };
+export function toRoutineWithStatus(routine: Routine, baseUrl?: string): RoutineWithStatus {
+  const running = isRoutineRunning(routine.id);
+  if (routine.trigger.type === "webhook" && baseUrl) {
+    return { ...routine, running, webhookUrl: `${baseUrl}/api/routines/hook/${routine.trigger.token}` };
+  }
+  return { ...routine, running };
 }

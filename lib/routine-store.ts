@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isValidCron } from "./cron";
+import { generateWebhookToken, tokensEqual } from "./webhook-tokens";
 import {
   DEFAULT_EXECUTION_MS,
   DEFAULT_GUARD_TIMEOUT_MS,
@@ -57,6 +58,7 @@ export interface RoutineInput {
   modelId?: unknown;
   maxExecutionMs?: unknown;
   enabled?: unknown;
+  askWebhookUrl?: unknown;
 }
 
 export type ValidationResult =
@@ -72,6 +74,7 @@ export interface ValidatedRoutineFields {
   modelId?: string;
   maxExecutionMs: number;
   enabled: boolean;
+  askWebhookUrl?: string;
 }
 
 declare global {
@@ -108,6 +111,12 @@ export function normalizeTrigger(input: RoutineInput): RoutineTrigger | { error:
     if (!schedule) return { error: "cron schedule is required" };
     if (!isValidCron(schedule)) return { error: `invalid cron schedule: "${schedule}"` };
     return { type: "cron", schedule };
+  }
+
+  if (raw.type === "webhook") {
+    // The token is assigned/managed by the store, not the client; pass through
+    // an existing one so updates keep the same URL.
+    return { type: "webhook", token: typeof raw.token === "string" ? raw.token : "" };
   }
 
   if (raw.type === "guard") {
@@ -186,6 +195,21 @@ export function validateRoutineFields(input: RoutineInput): ValidationResult {
 
   const enabled = input.enabled === undefined ? true : input.enabled === true;
 
+  let askWebhookUrl: string | undefined;
+  if (input.askWebhookUrl !== undefined && input.askWebhookUrl !== null && input.askWebhookUrl !== "") {
+    if (typeof input.askWebhookUrl !== "string") return { ok: false, error: "askWebhookUrl must be a string" };
+    let parsed: URL;
+    try {
+      parsed = new URL(input.askWebhookUrl.trim());
+    } catch {
+      return { ok: false, error: "askWebhookUrl must be an absolute URL" };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { ok: false, error: "askWebhookUrl must use http or https" };
+    }
+    askWebhookUrl = input.askWebhookUrl.trim();
+  }
+
   return {
     ok: true,
     value: {
@@ -196,6 +220,7 @@ export function validateRoutineFields(input: RoutineInput): ValidationResult {
       ...(provider && modelId ? { provider, modelId } : {}),
       maxExecutionMs,
       enabled,
+      ...(askWebhookUrl ? { askWebhookUrl } : {}),
     },
   };
 }
@@ -231,6 +256,7 @@ function migrateRoutine(raw: unknown): Routine | null {
     ...(typeof raw.modelId === "string" ? { modelId: raw.modelId } : {}),
     maxExecutionMs,
     enabled: raw.enabled === true,
+    ...(typeof raw.askWebhookUrl === "string" ? { askWebhookUrl: raw.askWebhookUrl } : {}),
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : now,
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : now,
     ...(isRecord(raw.lastRun) ? { lastRun: raw.lastRun as unknown as RoutineRun } : {}),
@@ -294,6 +320,14 @@ export function getRoutine(id: string, agentDir?: string): Routine | undefined {
  * cwd first (see validateRoutineFields and the API's allowed-roots check); this
  * additionally requires the directory to exist.
  */
+/** Ensure a webhook trigger has a token, generating or preserving as needed. */
+function withWebhookToken(trigger: RoutineTrigger, previous?: RoutineTrigger): RoutineTrigger {
+  if (trigger.type !== "webhook") return trigger;
+  if (trigger.token) return trigger;
+  const carried = previous?.type === "webhook" ? previous.token : "";
+  return { type: "webhook", token: carried || generateWebhookToken() };
+}
+
 export function createRoutine(fields: ValidatedRoutineFields, agentDir?: string): Routine {
   const dir = resolveAgentDir(agentDir);
   if (!existsSync(fields.cwd)) throw new Error(`Directory does not exist: ${fields.cwd}`);
@@ -302,6 +336,7 @@ export function createRoutine(fields: ValidatedRoutineFields, agentDir?: string)
   const routine: Routine = {
     id: randomUUID(),
     ...fields,
+    trigger: withWebhookToken(fields.trigger),
     createdAt: now,
     updatedAt: now,
     history: [],
@@ -320,13 +355,47 @@ export function updateRoutine(id: string, fields: ValidatedRoutineFields, agentD
   const updated: Routine = {
     ...existing,
     ...fields,
+    trigger: withWebhookToken(fields.trigger, existing.trigger),
+    // askWebhookUrl is only present in fields when set; clear it otherwise.
+    askWebhookUrl: fields.askWebhookUrl,
     id: existing.id,
     createdAt: existing.createdAt,
+    updatedAt: new Date().toISOString(),
+  };
+  if (updated.askWebhookUrl === undefined) delete updated.askWebhookUrl;
+  store.set(id, updated);
+  persist(dir, store);
+  return updated;
+}
+
+/** Regenerate a webhook routine's token (revokes the old URL). */
+export function regenerateWebhookToken(id: string, agentDir?: string): Routine {
+  const dir = resolveAgentDir(agentDir);
+  const store = getStore(dir);
+  const existing = store.get(id);
+  if (!existing) throw new Error(`Routine not found: ${id}`);
+  if (existing.trigger.type !== "webhook") throw new Error("Routine is not webhook-triggered");
+  const updated: Routine = {
+    ...existing,
+    trigger: { type: "webhook", token: generateWebhookToken() },
     updatedAt: new Date().toISOString(),
   };
   store.set(id, updated);
   persist(dir, store);
   return updated;
+}
+
+/** Find a webhook routine by token using a constant-time comparison. */
+export function findRoutineByWebhookToken(token: string, agentDir?: string): Routine | undefined {
+  if (!token) return undefined;
+  const dir = resolveAgentDir(agentDir);
+  let match: Routine | undefined;
+  for (const routine of getStore(dir).values()) {
+    if (routine.trigger.type === "webhook" && tokensEqual(routine.trigger.token, token)) {
+      match = routine;
+    }
+  }
+  return match;
 }
 
 /** Patch a subset of mutable fields (e.g. the enabled toggle) without full validation. */
