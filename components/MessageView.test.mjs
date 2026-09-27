@@ -50,7 +50,7 @@ test("renders partial assistant content before the provider error", () => {
   assert.match(html, /Error: Connection closed/);
 });
 
-test("renders shell blocks as themed terminal content", () => {
+test("renders shell blocks as themed terminal content, collapsed by default", () => {
   const html = renderToStaticMarkup(
     React.createElement(
       I18nProvider,
@@ -78,11 +78,18 @@ test("renders shell blocks as themed terminal content", () => {
     ),
   );
 
+  // Command block renders as a themed console with a collapsible toggle.
   assert.match(html, /class="shell-output-preview"/);
   assert.match(html, /git<\/span>/);
   assert.match(html, /--short/);
-  assert.match(html, /Output/);
-  assert.match(html, /components\/MessageView\.tsx/);
+  // Collapsed by default: the toggle button reports aria-expanded="false".
+  assert.match(html, /class="shell-command-line shell-command-toggle"/);
+  assert.match(html, /aria-expanded="false"/);
+  // While collapsed the header shows the command plus a one-line output preview…
+  assert.match(html, /class="shell-collapsed-preview">staged 0, unstaged 1</);
+  // …but the full output body and its extra lines stay folded away.
+  assert.doesNotMatch(html, /class="shell-output-body"/);
+  assert.doesNotMatch(html, /components\/MessageView\.tsx/);
 });
 
 test("uses i/title in the standard header for grep, read, write, glob, and eval blocks", () => {

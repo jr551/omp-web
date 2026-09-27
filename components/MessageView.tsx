@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo } from "react";
+import { memo, useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs, vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { MarkdownBody } from "./MarkdownBody";
@@ -12,6 +12,7 @@ import { getAssistantErrorMessage, isHiddenAssistantBlock } from "@/lib/message-
 import { useDisplaySettings } from "@/hooks/useDisplaySettings";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi } from "@/lib/ansi";
+import { firstCommandOutputLine, initialCommandBlockExpanded } from "@/lib/command-block";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
 import type {
@@ -175,6 +176,26 @@ function loadThinkingContent(sessionId: string, entryId: string, blockIndex: num
     if (oldestKey) thinkingContentCache.delete(oldestKey);
   }
   return request;
+}
+
+// Per-block expand state for collapsible command/console blocks, keyed by a
+// stable block id (the tool call id). Module-level so a toggle survives the
+// component unmounting/remounting as the transcript re-renders — the block
+// still defaults to collapsed the first time it is seen.
+const commandBlockExpandState = new Map<string, boolean>();
+
+function useCommandBlockExpanded(blockKey: string | undefined): [boolean, () => void] {
+  const [expanded, setExpanded] = useState<boolean>(() =>
+    initialCommandBlockExpanded(blockKey ? commandBlockExpandState.get(blockKey) : undefined),
+  );
+  const toggle = useCallback(() => {
+    setExpanded((prev) => {
+      const next = !prev;
+      if (blockKey) commandBlockExpandState.set(blockKey, next);
+      return next;
+    });
+  }, [blockKey]);
+  return [expanded, toggle];
 }
 
 interface Props {
@@ -883,6 +904,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
   if (isBashTool) {
     const consoleView = (
       <ConsoleOutputPreview
+        blockKey={block.toolCallId}
         command={isRecord(block.input) && typeof block.input.command === "string" ? block.input.command : ""}
         output={resultText ?? ""}
         pending={!result}
@@ -1282,6 +1304,7 @@ function TodoChecklistRow({ task }: { task: TodoPreviewTask }) {
 }
 
 function ConsoleOutputPreview({
+  blockKey,
   command,
   output,
   pending,
@@ -1289,6 +1312,7 @@ function ConsoleOutputPreview({
   duration,
   local,
 }: {
+  blockKey?: string;
   command: string;
   output: string;
   pending: boolean;
@@ -1298,13 +1322,22 @@ function ConsoleOutputPreview({
 }) {
   const { isDark } = useTheme();
   const { t } = useI18n();
+  const [expanded, toggleExpanded] = useCommandBlockExpanded(blockKey);
   const normalizedLines = normalizeCustomPanelLines(output.split(/\r?\n/));
   const outputLines = normalizedLines.length === 1 && normalizedLines[0] === "" ? [] : normalizedLines;
   const statusLabel = pending ? t("chat.runningCommand") : isError ? "failed" : "";
+  // Collapsed header still shows a one-line preview of the output so a folded
+  // block conveys what happened without being expanded.
+  const collapsedPreview = !expanded && !pending ? firstCommandOutputLine(output) : "";
 
   return (
-    <div className={`shell-output-preview${isError ? " is-error" : ""}`}>
-      <div className="shell-command-line">
+    <div className={`shell-output-preview${isError ? " is-error" : ""}`} data-expanded={expanded}>
+      <button
+        type="button"
+        className="shell-command-line shell-command-toggle"
+        aria-expanded={expanded}
+        onClick={toggleExpanded}
+      >
         <span className="shell-command-prompt" aria-hidden="true">$</span>
         <SyntaxHighlighter
           className="shell-command-code"
@@ -1314,27 +1347,52 @@ function ConsoleOutputPreview({
           CodeTag="span"
           wrapLongLines
           customStyle={{
-            flex: 1,
+            flex: expanded ? 1 : "0 1 auto",
             minWidth: 0,
             margin: 0,
             padding: 0,
             border: "none",
-            overflow: "visible",
+            overflow: "hidden",
             background: "transparent",
             color: "var(--text)",
             fontFamily: "var(--font-mono)",
             fontSize: 13,
             lineHeight: 1.55,
-            whiteSpace: "pre-wrap",
+            whiteSpace: expanded ? "pre-wrap" : "nowrap",
+            textOverflow: expanded ? "clip" : "ellipsis",
             overflowWrap: "anywhere",
           }}
           codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
         >
           {command || " "}
         </SyntaxHighlighter>
+        {collapsedPreview && <span className="shell-collapsed-preview">{collapsedPreview}</span>}
+        <span className="shell-command-spacer" />
         {local && <span className="shell-local-label">local</span>}
-      </div>
+        {!expanded && statusLabel && (
+          <span className={`shell-output-status${isError ? " is-error" : pending ? " is-pending" : ""}`}>{statusLabel}</span>
+        )}
+        {!expanded && duration !== undefined && (
+          <span className="shell-collapsed-duration">{duration}s</span>
+        )}
+        <svg
+          className="shell-command-chevron"
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          fill="none"
+          stroke="var(--text-dim)"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}
+        >
+          <polyline points="2 3.5 5 6.5 8 3.5" />
+        </svg>
+      </button>
 
+      {expanded && (
       <div className="shell-output-panel">
         <div className="shell-output-divider">
           <span className="shell-output-label">Output</span>
@@ -1369,8 +1427,9 @@ function ConsoleOutputPreview({
           )}
         </div>
       </div>
+      )}
 
-      {duration !== undefined && (
+      {expanded && duration !== undefined && (
         <div className="shell-output-footer">{duration}s</div>
       )}
     </div>
