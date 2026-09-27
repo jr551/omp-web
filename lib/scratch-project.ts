@@ -49,3 +49,44 @@ function homeDirSafe(): string {
     return "";
   }
 }
+
+/**
+ * A sidebar project group as the sidebar builds it, generic over the session and
+ * routine row types so this helper stays pure and unit-testable.
+ */
+export interface ScratchGroupInput<S, R> {
+  project: string;
+  name: string;
+  isScratch: boolean;
+  sessions: S[];
+  routines: R[];
+}
+
+/**
+ * Collapse every scratch project group (`~/omp-cwd-*`, temp dirs) into a SINGLE
+ * "Non Project Related" group so multiple scratch roots do not each render as a
+ * separate group. The merged group keeps the first scratch group's `project`
+ * key (the sidebar sorts scratch-first by recency, so that is the most recent
+ * root), gets the shared `label` as its name, and concatenates the sessions and
+ * routines of every scratch root. The merged group is pinned to the very top;
+ * non-scratch groups keep their original relative order after it.
+ *
+ * Pure — no filesystem access — so it can be unit tested with plain arrays.
+ */
+export function collapseScratchGroups<S, R>(
+  groups: ScratchGroupInput<S, R>[],
+  label: string,
+): ScratchGroupInput<S, R>[] {
+  const scratch = groups.filter((group) => group.isScratch);
+  const nonScratch = groups.filter((group) => !group.isScratch);
+  if (scratch.length === 0) return nonScratch;
+
+  const merged: ScratchGroupInput<S, R> = {
+    project: scratch[0].project,
+    name: label,
+    isScratch: true,
+    sessions: scratch.flatMap((group) => group.sessions),
+    routines: scratch.flatMap((group) => group.routines),
+  };
+  return [merged, ...nonScratch];
+}
