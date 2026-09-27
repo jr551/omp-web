@@ -3,7 +3,12 @@ import type { configureHttpDispatcher as ConfigureHttpDispatcher } from "@/lib/h
 type DispatcherModule = { configureHttpDispatcher: typeof ConfigureHttpDispatcher };
 
 export async function register(): Promise<void> {
-  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  // The Routines scheduler must run on the server runtime under Bun. Next may
+  // invoke register() with NEXT_RUNTIME set to "nodejs" OR (under `bun next
+  // start`) left undefined; only the edge runtime must be skipped. The earlier
+  // `!== "nodejs"` guard silently skipped startup under Bun, so cron routines
+  // never fired until a manual run started the scheduler lazily.
+  if (process.env.NEXT_RUNTIME === "edge") return;
 
   // Start the native Routines scheduler once per server process. Unlike the
   // http-dispatcher below, this must also run under Bun — Bun is the runtime
@@ -11,6 +16,8 @@ export async function register(): Promise<void> {
   const { startRoutineScheduler } = await import("@/lib/routine-scheduler");
   startRoutineScheduler();
 
+  // The Node-only http-dispatcher wiring below stays gated to the Node runtime.
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (typeof process.versions.bun === "string") return;
 
   // Keep the Node-only undici graph out of Next's browser/edge instrumentation
