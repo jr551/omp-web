@@ -509,6 +509,66 @@ omp-web can run a prompt in a project unattended, on a schedule or a condition.
   `proxy.ts`** ahead of the host/cross-site + password checks (the token is the
   whole authorization, and tunnels reach them from arbitrary hosts).
 
+### smartwake
+
+A built-in tool that lets a worker (the agent) schedule a future wake of **its
+own** session, so it can pause now and resume later with a message. Two modes:
+
+- **delayed**: `{ message, delayMs | at, expiresInMs? }` — fire after a delay
+  (`delayMs` from now) or at an absolute time (`at` as epoch ms or ISO string).
+- **guarded (smart)**: `{ message, pollCommand, intervalMs, guardTimeoutMs?,
+  expectOutputMatches?, expiresInMs? }` — poll `pollCommand` via `bash -lc` every
+  `intervalMs` (reusing `evaluateGuard` from `lib/guard-command.ts`) and fire the
+  first time it exits 0 (and matches the optional stdout regex).
+
+Both modes require an **expiry** (`expiresInMs`, default 1h, max 24h): if the
+wake has not fired by then it is dropped and recorded with status `expired` (we
+just drop + record — no "expired" note is delivered, to keep the session clean).
+The tool returns a wake id and a human summary ("will wake in 10m…", "will wake
+when `<cmd>` succeeds, expires in 2h"). `op:"list"` / `op:"cancel"` (with `id`)
+let a worker list or cancel **its own** pending wakes.
+
+- **Tool registration** (`lib/wake-tool.ts`): `createSmartwakeTool()` returns a
+  `CustomTool` (`{ name, label, description, parameters, loadMode, approval,
+  execute }`). It is added to `sessionOptions.customTools` in
+  `lib/rpc-manager.ts` `startRpcSession`, so **every** session gets it. The tool
+  is stateless — `execute` reads its own session identity
+  (`ctx.sessionManager.getSessionId()/getCwd()/getSessionFile()`) at call time.
+  `loadMode: "essential"` keeps it top-level (not hidden behind tool search);
+  `approval: "read"` avoids an approval prompt that would block an unattended
+  worker (the scheduling call only writes a small JSON record, and the eventual
+  guarded poll is equivalent to the `bash` the agent already has). `parameters`
+  is a plain JSON-schema object (`TJsonSchema`), so no schema-builder dependency.
+- **Types + validation** (`lib/wake-types.ts`): client-safe, `fs`/SDK-free, with
+  bounds and a pure `validateWakeInput(input, now)` + `summarizeWake` /
+  `humanizeDuration` — mirrors `lib/routine-types.ts`.
+- **Store** (`lib/wake-store.ts`): pending wakes persist as JSON at
+  `<agentDir>/omp-web-wakes.json` (`0600`, atomic replace) with a `globalThis`
+  in-memory cache, exactly like `lib/routine-store.ts`. Each wake:
+  `{ id, sessionId, cwd, sessionFile?, mode, message, fireAt?, pollCommand?,
+  intervalMs?, guardTimeoutMs?, expectOutputMatches?, createdAt, expiresAt,
+  lastPollAt?, resolvedAt?, status, statusReason? }`. Terminal wakes are pruned
+  after 1h; a per-session pending cap (50) bounds abuse.
+- **Watcher** (`lib/wake-scheduler.ts`): shares the Routines scheduler's single
+  `globalThis` interval — `startRoutineScheduler`'s tick calls `tickWakes()`, so
+  no second timer and it inherits the instrumentation start (runs under Bun).
+  Each tick drops expired wakes, fires delayed wakes when `now >= fireAt`, and
+  polls guarded wakes when their interval elapsed; a `firing` set + terminal
+  status give fire-once dedupe, with a small concurrency cap (3). The tick,
+  guard, and delivery are injectable and unit-tested (fake clock/guard/delivery —
+  no real agents/shell/network).
+- **Delivery**: `deliverWakeReal` looks up the live `AgentSessionWrapper` by
+  sessionId in `globalThis.__ompSessions` (`getRpcSession`). If it is live and
+  idle, the message is delivered as a `prompt` (non-blocking; a watching browser
+  sees the agent resume). If it is live but busy, delivery is deferred and
+  retried next tick. **Fallback when the session is not live**: it is resumed
+  from its stored `sessionFile` via `startRpcSession(sessionId, sessionFile, cwd)`
+  and the message delivered as a headless turn via
+  `runPromptInSession` (`lib/routine-runner.ts`), which declines blocking UI so
+  it never hangs; the resumed session idle-times out afterwards. A wake with no
+  stored `sessionFile` that is not live is marked `failed` (this is the robust,
+  documented choice — we do not silently lose the wake).
+
 ## omp Session File Format
 
 Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`

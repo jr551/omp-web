@@ -33,6 +33,7 @@ import { resolveSessionSystemPrompts } from "./session-system-prompt";
 import { readDefaultModelRole } from "./model-roles";
 import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
 import { PRESET_FULL } from "./tool-presets";
+import { createSmartwakeTool } from "./wake-tool";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import type { SlashCommandInfo } from "./omp-types";
 import type { AdvisorStatusInfo, AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./omp-types";
@@ -1882,6 +1883,10 @@ export async function startRpcSession(
         ...(initial.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
         ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
         ...(toolsOption !== undefined ? { toolNames: toolsOption, restrictToolNames: true } : {}),
+        // Register the built-in `smartwake` tool on every session so a worker can
+        // schedule a future wake of its own session (lib/wake-tool.ts). The tool
+        // reads its own session identity from the CustomToolContext at call time.
+        customTools: [createSmartwakeTool()],
         ...(untrusted ?? {}),
       };
       // omp's own applier, so a prompt file goes through the same templates the

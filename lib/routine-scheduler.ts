@@ -7,6 +7,7 @@ import {
   type GuardVerdict,
 } from "./guard-command";
 import { runPromptInFreshSession, type RunOutcome } from "./routine-runner";
+import { tickWakes } from "./wake-scheduler";
 import {
   listRoutines as storeListRoutines,
   getRoutine as storeGetRoutine,
@@ -276,6 +277,10 @@ export function startRoutineScheduler(): void {
   const tick = () => {
     void runSchedulerTick(singleton.deps, singleton.state).catch((error) => {
       console.error("[omp-web] routine scheduler tick failed:", error instanceof Error ? error.message : error);
+    });
+    // The smartwake watcher shares this single interval (lib/wake-scheduler.ts).
+    void tickWakes().catch((error) => {
+      console.error("[omp-web] smartwake tick failed:", error instanceof Error ? error.message : error);
     });
   };
   singleton.interval = setInterval(tick, TICK_INTERVAL_MS);
