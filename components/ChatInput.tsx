@@ -21,6 +21,13 @@ import {
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
 import {
+  assembleMessageWithPastedTexts,
+  pastedTextPreview,
+  pastedTextStats,
+  shouldAttachPastedText,
+  type PastedText,
+} from "@/lib/paste-attachments";
+import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
@@ -470,6 +477,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  // Long pastes become chips instead of inline text. Intentionally not persisted
+  // to the draft store — they live only until the message is sent.
+  const [pastedTexts, setPastedTexts] = useState<PastedText[]>([]);
+  const [expandedPastedTextId, setExpandedPastedTextId] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -511,6 +522,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const draftKeyRef = useRef(draftKey);
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
+  const pastedTextsRef = useRef(pastedTexts);
+  const pastedTextIdRef = useRef(0);
   const pendingImageCountRef = useRef(0);
   const pendingImagesRef = useRef<Promise<void> | null>(null);
   const waitingForImagesRef = useRef(false);
@@ -518,6 +531,39 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const imageAttachErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+  pastedTextsRef.current = pastedTexts;
+
+  const addPastedText = useCallback((text: string) => {
+    const id = `paste-${Date.now()}-${pastedTextIdRef.current++}`;
+    setPastedTexts((prev) => {
+      const next = [...prev, { id, text }];
+      pastedTextsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const removePastedText = useCallback((id: string) => {
+    setPastedTexts((prev) => {
+      const next = prev.filter((entry) => entry.id !== id);
+      pastedTextsRef.current = next;
+      return next;
+    });
+    setExpandedPastedTextId((current) => (current === id ? null : current));
+  }, []);
+
+  const updatePastedText = useCallback((id: string, text: string) => {
+    setPastedTexts((prev) => {
+      const next = prev.map((entry) => (entry.id === id ? { ...entry, text } : entry));
+      pastedTextsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const clearPastedTexts = useCallback(() => {
+    pastedTextsRef.current = [];
+    setPastedTexts([]);
+    setExpandedPastedTextId(null);
+  }, []);
 
   const dismissImageAttachError = useCallback(() => {
     if (imageAttachErrorTimerRef.current) {
@@ -830,10 +876,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     clearImages();
+    clearPastedTexts();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, draftKey]);
+  }, [clearImages, clearPastedTexts, draftKey]);
 
   useEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
@@ -889,9 +936,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!(await waitForPendingImages())) return;
     const msg = valueRef.current.trim();
     const images = attachedImagesRef.current;
-    if (!msg && !images.length) return;
+    const pasted = pastedTextsRef.current;
+    if (!msg && !images.length && !pasted.length) return;
     onAudioUnlock?.();
-    if (!images.length && msg.startsWith("/") && onBuiltinCommand) {
+    if (!images.length && !pasted.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
         if (!result.error) {
@@ -901,8 +949,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
     }
+    const assembled = assembleMessageWithPastedTexts(msg, pasted);
     clearInput();
-    onSend(msg, images.length ? images : undefined);
+    onSend(assembled, images.length ? images : undefined);
   }, [isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, waitForPendingImages]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
@@ -947,7 +996,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? t(slashQuery ? "chat.match" : "chat.command")
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText && attachedImages.length === 0;
+  const hasSendableContent = hasInputText || attachedImages.length > 0 || pastedTexts.length > 0;
+  const canQueueStreamingMessage = (hasInputText || pastedTexts.length > 0) && attachedImages.length === 0;
 
   // ── @ file autocomplete ──────────────────────────────────────────────────
   // Recomputed from the text before the caret on every change/caret move.
@@ -1144,22 +1194,25 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!(await waitForPendingImages())) return;
     const msg = valueRef.current.trim();
     const images = attachedImagesRef.current;
-    if (!msg && !images.length) return;
+    const pasted = pastedTextsRef.current;
+    if (!msg && !images.length && !pasted.length) return;
     // Queued (steer/follow-up) messages cannot carry images; the composer keeps
-    // them until the turn ends rather than dropping them.
+    // them until the turn ends rather than dropping them. Pasted-text
+    // attachments are plain text, so they fold into the queued message.
     if (images.length) return;
     onAudioUnlock?.();
+    const assembled = assembleMessageWithPastedTexts(msg, pasted);
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
       clearInput();
-      onPromptWithStreamingBehavior(msg, streamingBehavior);
+      onPromptWithStreamingBehavior(assembled, streamingBehavior);
       return;
     }
     clearInput();
     if (mode === "steer" && onSteer) {
-      onSteer(msg);
+      onSteer(assembled);
     } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg);
+      onFollowUp(assembled);
     }
   }, [onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, waitForPendingImages]);
 
@@ -1345,10 +1398,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       .filter((item) => item.kind === "file" || item.type.startsWith("image/"))
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null && resolveImageMimeType(f) !== null);
-    if (!files.length) return;
-    e.preventDefault();
-    processImageFiles(files);
-  }, [processImageFiles]);
+    if (files.length) {
+      e.preventDefault();
+      processImageFiles(files);
+      return;
+    }
+    // A very large text paste is dumped as an attachment chip instead of being
+    // inlined into the composer, so it does not bury what the user is typing.
+    const pastedText = e.clipboardData?.getData("text/plain") ?? "";
+    if (shouldAttachPastedText(pastedText)) {
+      e.preventDefault();
+      addPastedText(pastedText);
+    }
+  }, [processImageFiles, addPastedText]);
 
   useEffect(() => {
     if (slashQuery === null) {
@@ -1702,6 +1764,138 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             ))}
           </div>
         )}
+
+        {/* Pasted-text attachments (large pastes attached instead of inlined) */}
+        {pastedTexts.length > 0 && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+            {pastedTexts.map((entry) => {
+              const stats = pastedTextStats(entry.text);
+              return (
+                <div
+                  key={entry.id}
+                  style={{ position: "relative", flexShrink: 0, maxWidth: 260 }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setExpandedPastedTextId(entry.id)}
+                    title={t("chat.pastedTextExpand")}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      width: "100%", minWidth: 0,
+                      padding: "6px 26px 6px 9px",
+                      background: "var(--bg-panel)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      textAlign: "left",
+                      color: "var(--text)",
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--text-muted)" }} aria-hidden="true">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <path d="M14 2v6h6" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="13" y2="17" />
+                    </svg>
+                    <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+                      <span style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {pastedTextPreview(entry.text) || t("chat.pastedText")}
+                      </span>
+                      <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                        {t("chat.pastedTextMeta", { chars: stats.chars, lines: stats.lines })}
+                      </span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removePastedText(entry.id)}
+                    aria-label={t("chat.pastedTextRemove")}
+                    title={t("chat.pastedTextRemove")}
+                    style={{
+                      position: "absolute", top: -4, right: -4,
+                      width: 16, height: 16, borderRadius: "50%",
+                      background: "var(--bg-panel)", border: "1px solid var(--border)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                    }}
+                  >
+                    <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                      <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {expandedPastedTextId !== null && (() => {
+          const entry = pastedTexts.find((item) => item.id === expandedPastedTextId);
+          if (!entry) return null;
+          const stats = pastedTextStats(entry.text);
+          return (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={t("chat.pastedText")}
+              className="viewport-dialog-backdrop"
+              onClick={() => setExpandedPastedTextId(null)}
+              style={{
+                position: "fixed", inset: 0, zIndex: 200,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "rgba(0,0,0,0.4)", padding: 16,
+              }}
+            >
+              <div
+                className="viewport-dialog"
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  display: "flex", flexDirection: "column",
+                  width: "min(720px, 100%)", maxHeight: "80dvh",
+                  background: "var(--bg)", border: "1px solid var(--border)",
+                  borderRadius: 12, overflow: "hidden",
+                  boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+                }}
+              >
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  padding: "10px 12px", borderBottom: "1px solid var(--border)",
+                  background: "var(--bg-panel)",
+                }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{t("chat.pastedText")}</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                    {t("chat.pastedTextMeta", { chars: stats.chars, lines: stats.lines })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedPastedTextId(null)}
+                    aria-label={t("chat.close")}
+                    title={t("chat.close")}
+                    style={{
+                      marginLeft: "auto", width: 22, height: 22, borderRadius: 6,
+                      background: "transparent", border: "1px solid var(--border)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                    }}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                      <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                    </svg>
+                  </button>
+                </div>
+                <textarea
+                  value={entry.text}
+                  onChange={(e) => updatePastedText(entry.id, e.target.value)}
+                  spellCheck={false}
+                  style={{
+                    flex: 1, minHeight: 200, resize: "none",
+                    padding: "12px 14px", border: "none", outline: "none",
+                    background: "var(--bg)", color: "var(--text)",
+                    fontFamily: "var(--font-mono)", fontSize: 13, lineHeight: 1.5,
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Main input */}
         <div ref={composerAnchorRef} style={{ position: "relative", minWidth: 0 }}>
@@ -2152,21 +2346,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={!hasSendableContent}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: hasSendableContent ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "#fff" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: hasSendableContent ? "#fff" : "var(--text-dim)",
+                cursor: hasSendableContent ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
+                boxShadow: hasSendableContent ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >

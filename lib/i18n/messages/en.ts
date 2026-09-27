@@ -548,5 +548,9 @@ export const enLocale: LocalePlugin = {
     "i18n.taskFinished": "Task finished.",
     "i18n.attentionNeeded": "Pi needs your attention",
     "i18n.extensionInputNeeded": "An extension is waiting for your input.",
+    "chat.pastedText": "Pasted text",
+    "chat.pastedTextMeta": "{chars} chars · {lines} lines",
+    "chat.pastedTextExpand": "View / edit pasted text",
+    "chat.pastedTextRemove": "Remove pasted text",
   },
 };
