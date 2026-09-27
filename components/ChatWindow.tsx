@@ -27,6 +27,7 @@ import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { OmpWordmark } from "./OmpWordmark";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import type { SoundCue } from "@/hooks/useAudio";
 import { useSyncedDisplaySettings } from "@/hooks/useDisplaySettings";
 import { formatTokenCount } from "@/lib/format-tokens";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -60,7 +61,9 @@ interface Props {
    *  a non-active workspace can still ring. */
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
-  playDoneSound?: () => void;
+  /** Plays a notification cue. Defaults to the completion tone when no cue is
+   *  given, so callers wanting just "done" can call it with no argument. */
+  playDoneSound?: (cue?: SoundCue) => void;
   unlockAudio?: () => void;
 }
 
@@ -238,9 +241,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
   const soundedExtensionDialogIdRef = useRef<string | null>(null);
+  const soundedErrorNoticeIdsRef = useRef<Set<string>>(new Set());
   const wrappedOnAgentEnd = useCallback(() => {
     if (soundEnabledRef.current) {
-      playDoneSoundRef.current();
+      playDoneSoundRef.current("done");
     }
     onAgentEnd?.();
   }, [onAgentEnd]);
@@ -281,11 +285,33 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
   const { hideThinkingBlock } = useSyncedDisplaySettings(newSessionCwd ?? session?.cwd ?? null);
   const displayOptions = useMemo<DisplayOptions>(() => ({ hideThinking: hideThinkingBlock }), [hideThinkingBlock]);
 
+  // A blocking extension dialog means the agent needs the operator's attention:
+  // play the distinct attention cue (once per dialog).
   useEffect(() => {
     if (!extensionDialog || soundedExtensionDialogIdRef.current === extensionDialog.id) return;
     soundedExtensionDialogIdRef.current = extensionDialog.id;
-    playDoneSoundRef.current();
+    playDoneSoundRef.current("attention");
   }, [extensionDialog]);
+
+  // Play the error cue the first time each error notice appears (send failures,
+  // provider errors, etc. all surface as type "error" notices).
+  useEffect(() => {
+    const seen = soundedErrorNoticeIdsRef.current;
+    const currentIds = new Set<string>();
+    let hasNewError = false;
+    for (const notice of notices) {
+      currentIds.add(notice.id);
+      if (notice.type === "error" && !seen.has(notice.id)) {
+        seen.add(notice.id);
+        hasNewError = true;
+      }
+    }
+    // Forget ids no longer present so a later notice reusing an id can re-sound.
+    for (const id of seen) {
+      if (!currentIds.has(id)) seen.delete(id);
+    }
+    if (hasNewError) playDoneSoundRef.current("error");
+  }, [notices]);
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {

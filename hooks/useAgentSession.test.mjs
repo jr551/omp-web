@@ -74,7 +74,8 @@ test("plays the enabled sound once for each extension dialog", () => {
     /soundedExtensionDialogIdRef\.current === extensionDialog\.id/,
   );
   assert.match(chatWindowSource, /soundedExtensionDialogIdRef\.current = extensionDialog\.id/);
-  assert.match(chatWindowSource, /playDoneSoundRef\.current\(\)/);
+  // A blocking dialog needs the operator's attention -> distinct attention cue.
+  assert.match(chatWindowSource, /playDoneSoundRef\.current\("attention"\)/);
 });
 
 test("keeps completed subagents in the session history", () => {
