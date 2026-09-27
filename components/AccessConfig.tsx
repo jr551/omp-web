@@ -85,8 +85,7 @@ export function AccessConfig() {
     setPassword("");
     setConfirmation("");
     setNotice(
-      `Password saved and password access turned on. The browser will ask for the username "${updated.username}"`
-      + " and this password on the next request.",
+      "Password saved and password access turned on. You will be asked to sign in with it on the next request.",
     );
   }, [confirmation, password, send]);
 
@@ -95,7 +94,7 @@ export function AccessConfig() {
     const updated = await send(status.enabled ? "disable" : "enable");
     if (!updated) return;
     setNotice(updated.enabled
-      ? `Password access is on. The browser will ask for the username "${updated.username}" and your password on the next request.`
+      ? "Password access is on. You will be asked to sign in on the next request."
       : "Password access is off. The stored password is kept and can be switched back on here.");
   }, [send, status]);
 
@@ -117,9 +116,10 @@ export function AccessConfig() {
       <header className={styles.contentHeader}>
         <h2 className={styles.contentTitle}>Access</h2>
         <p className={styles.contentDescription}>
-          A password locks the web interface and every API endpoint behind HTTP Basic Auth, with the fixed
-          username <code>{status.username}</code>. It is stored as a scrypt hash in <code>{status.file}</code> —
-          omp-web never keeps the password itself, which is why forgetting it means recovering rather than reading it back.
+          A password locks the web interface and every API endpoint behind a login form. Signing in sets an
+          httpOnly session cookie; API clients may also send the password with HTTP Basic (username
+          <code>{status.username}</code>). It is stored as a scrypt hash in <code>{status.file}</code> — omp-web never
+          keeps the password itself, which is why forgetting it means recovering rather than reading it back.
         </p>
         {readOnly && (
           <div className={styles.readOnlyNotice}>
@@ -129,6 +129,22 @@ export function AccessConfig() {
         )}
         {notice && (
           <div className={styles.reloadNotice}><span>{notice}</span></div>
+        )}
+        {status.enabled && (
+          <div className={styles.settingControl} style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              className={styles.primaryButton}
+              disabled={busy}
+              onClick={() => {
+                void fetch("/api/web-access/logout", { method: "POST" }).finally(() => {
+                  window.location.href = "/login";
+                });
+              }}
+            >
+              Sign out
+            </button>
+          </div>
         )}
       </header>
 

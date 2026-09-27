@@ -309,6 +309,18 @@ resolved, and `bin/` is the only directory (besides `.next`) in the published
 npm `files` list, so `lib/` cannot hold it. `bin/web-auth-store.d.ts` is what the
 TypeScript half type-checks against — keep the two in sync.
 
+- Sign-in is a **form**, not the browser's Basic dialog. `proxy.ts` redirects an
+  unauthenticated navigation to `/login` (page `app/login/`) and returns `401`
+  (no `WWW-Authenticate`) with `{ loginPath }` for API calls. `/login` posts to
+  `POST /api/web-access/login`, which verifies the password and sets an httpOnly
+  `omp_web_session` cookie; `POST /api/web-access/logout` clears it. The cookie is
+  an HMAC over an expiry, keyed by a value **derived from the active credential**
+  (`sessionKeyFromPolicy` in `lib/web-auth.ts`), so it survives restarts but a
+  password change invalidates every existing session. An `Authorization: Basic`
+  header is still accepted for non-browser API clients. `/login`,
+  `/api/web-access/login` and `/logout` join `/recover` in the proxy's
+  unauthenticated allow-list (host + cross-site checks still apply).
+
 - The password is stored **only** as a scrypt digest in
   `<agentDir>/omp-web-auth.json` (`0600`, atomic replace). Nothing can read it
   back, which is why `/recover` and `--reset-password` exist.
