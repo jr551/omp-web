@@ -20,6 +20,7 @@ import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { AdvisorStatusInfo, ContextUsage, GoalStatusInfo, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
 import { planSlashCommandIntent, planSlashCommandOutcome, type WebPlanModeInfo } from "@/lib/plan-mode-web";
+import { mergeQueued, reconcilePending, type OptimisticQueueEntry } from "@/lib/queue-optimistic";
 
 export interface SessionData {
   sessionId: string;
@@ -455,6 +456,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const contextUsageRequestIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   const modelSwitchPendingRef = useRef(false);
+  // Optimistic steer/follow-up queue: `serverQueueRef` is the last server truth,
+  // `pendingQueueRef` holds entries shown before the server confirmed them. The
+  // visible `queuedMessages` is always their merge, so a queued message appears
+  // instantly and the background network call reconciles it without duplication.
+  const serverQueueRef = useRef<QueuedMessages>({ steering: [], followUp: [] });
+  const pendingQueueRef = useRef<OptimisticQueueEntry[]>([]);
+  const optimisticQueueIdRef = useRef(0);
+
+  // Apply an authoritative server queue: store it, drop any pending entries it
+  // now reflects, and publish the merged view.
+  const applyServerQueue = useCallback((server: QueuedMessages) => {
+    serverQueueRef.current = server;
+    pendingQueueRef.current = reconcilePending(pendingQueueRef.current, server);
+    setQueuedMessages(mergeQueued(server, pendingQueueRef.current));
+  }, []);
+
+  // Show a pending queue entry immediately (before the network confirms it).
+  const addOptimisticQueued = useCallback((kind: "steering" | "followUp", text: string): string => {
+    const id = `queue-${Date.now()}-${optimisticQueueIdRef.current++}`;
+    pendingQueueRef.current = [...pendingQueueRef.current, { id, kind, text }];
+    setQueuedMessages(mergeQueued(serverQueueRef.current, pendingQueueRef.current));
+    return id;
+  }, []);
+
+  // Roll a pending entry back (e.g. when its background send failed).
+  const removeOptimisticQueued = useCallback((id: string) => {
+    pendingQueueRef.current = pendingQueueRef.current.filter((entry) => entry.id !== id);
+    setQueuedMessages(mergeQueued(serverQueueRef.current, pendingQueueRef.current));
+  }, []);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -552,11 +582,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
-          if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
+          if (liveState.queuedMessages !== undefined) applyServerQueue(normalizeQueuedMessages(liveState.queuedMessages));
           if (liveState.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, liveState.subagents ?? []));
           if (liveState.planMode !== undefined) setPlanMode(liveState.planMode ?? null);
         } else if (!agentState.running) {
-          setQueuedMessages({ steering: [], followUp: [] });
+          // Not running: no queue, and any stale optimistic entry is void.
+          pendingQueueRef.current = [];
+          applyServerQueue({ steering: [], followUp: [] });
         }
         return agentState;
       } catch (e) {
@@ -569,7 +601,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, []);
+  }, [applyServerQueue]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -1085,7 +1117,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // would otherwise leave the "Stop compaction" UI stuck. No state
       // (wrapper destroyed) means nothing is compacting.
       setIsCompacting(state?.isCompacting ?? false);
-      setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+      applyServerQueue(normalizeQueuedMessages(state?.queuedMessages));
       if (state?.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
       setSubagents((current) => mergeSubagentSnapshots(current, state?.subagents ?? []));
       if (state?.planMode !== undefined) setPlanMode(state.planMode ?? null);
@@ -1101,7 +1133,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream]);
+  }, [finishPromptWithoutStream, applyServerQueue]);
   const refreshContextUsage = useCallback(async (sid: string, runId = promptRunIdRef.current) => {
     const requestId = contextUsageRequestIdRef.current + 1;
     contextUsageRequestIdRef.current = requestId;
@@ -1196,7 +1228,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (d.state?.advisor !== undefined) setAdvisorStatus(d.state.advisor ?? null);
               // Aborted turns can leave messages queued in pi (delivered with the
               // next turn); dead wrapper (no state) means the queue is gone.
-              setQueuedMessages(normalizeQueuedMessages(d.state?.queuedMessages));
+              applyServerQueue(normalizeQueuedMessages(d.state?.queuedMessages));
             })
             .catch(() => {});
         }
@@ -1416,7 +1448,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "queue_update":
-        setQueuedMessages({
+        applyServerQueue({
           steering: [...((event.steering as string[] | undefined) ?? [])],
           followUp: [...((event.followUp as string[] | undefined) ?? [])],
         });
@@ -1452,7 +1484,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, scheduleEventStreamClose, settleUiStage]);
+  }, [addNotice, applyServerQueue, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, onSessionRenamed, refreshContextUsage, scheduleEventStreamClose, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -2010,20 +2042,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // the real user message when pi delivers it (user message_end event). An
   // optimistic chat bubble here would duplicate the queue panel and turn into
   // a ghost message if the queue is recalled.
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSteer = useCallback((message: string, images?: AttachedImage[]) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "steer",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
+    // Show the queued message instantly; run the network call in the background
+    // and roll the optimistic entry back if it fails. The authoritative
+    // queue_update reconciles it away without duplication.
+    const optimisticId = addOptimisticQueued("steering", message);
+    void sendAgentCommand(sid, {
+      type: "steer",
+      message,
+      ...(piImages?.length ? { images: piImages } : {}),
+    }).catch((e) => {
       console.error("Failed to steer:", e);
-    }
-  }, []);
+      removeOptimisticQueued(optimisticId);
+    });
+  }, [addOptimisticQueued, removeOptimisticQueued]);
 
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
@@ -2045,20 +2080,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleFollowUp = useCallback((message: string, images?: AttachedImage[]) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "follow_up",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
+    // Optimistic: the follow-up appears immediately, the POST runs in the
+    // background, and the server's queue_update reconciles it.
+    const optimisticId = addOptimisticQueued("followUp", message);
+    void sendAgentCommand(sid, {
+      type: "follow_up",
+      message,
+      ...(piImages?.length ? { images: piImages } : {}),
+    }).catch((e) => {
       console.error("Failed to follow up:", e);
-    }
-  }, []);
+      removeOptimisticQueued(optimisticId);
+    });
+  }, [addOptimisticQueued, removeOptimisticQueued]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -2076,8 +2113,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, { type: "clear_queue" });
       // clearQueue also emits an empty queue_update, but that only reaches us
-      // while SSE is connected — clear locally so idle recalls update the UI.
-      setQueuedMessages({ steering: [], followUp: [] });
+      // while SSE is connected — clear locally (including any optimistic
+      // entries) so idle recalls update the UI.
+      pendingQueueRef.current = [];
+      applyServerQueue({ steering: [], followUp: [] });
       const texts = [...(result?.steering ?? []), ...(result?.followUp ?? [])];
       if (texts.length > 0) {
         chatInputRef?.current?.prependText(texts.join("\n\n"));
@@ -2086,7 +2125,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to recall queued messages:", e);
       addNotice({ type: "error", message: "Failed to recall queued messages" });
     }
-  }, [chatInputRef, addNotice]);
+  }, [chatInputRef, addNotice, applyServerQueue]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     setThinkingLevel(level);
@@ -2210,7 +2249,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
           if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
-          if (state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(state.queuedMessages));
+          if (state.queuedMessages !== undefined) applyServerQueue(normalizeQueuedMessages(state.queuedMessages));
           if (state.subagents !== undefined) setSubagents((current) => mergeSubagentSnapshots(current, state.subagents ?? []));
           if (state.goal !== undefined) setGoalStatus(state.goal ?? null);
           if (state.planMode !== undefined) setPlanMode(state.planMode ?? null);
