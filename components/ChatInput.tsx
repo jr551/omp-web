@@ -27,6 +27,7 @@ import {
   shouldAttachPastedText,
   type PastedText,
 } from "@/lib/paste-attachments";
+import { extractPastedImageFiles } from "@/lib/paste-images";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
@@ -1394,10 +1395,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const items = Array.from(e.clipboardData?.items ?? []);
     // Classify on the resolved media type, not the raw one: a clipboard image
     // can arrive as a file item with an empty `type`.
-    const files = items
-      .filter((item) => item.kind === "file" || item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((f): f is File => f !== null && resolveImageMimeType(f) !== null);
+    const files = extractPastedImageFiles(items, (f) => resolveImageMimeType(f) !== null);
     if (files.length) {
       e.preventDefault();
       processImageFiles(files);
