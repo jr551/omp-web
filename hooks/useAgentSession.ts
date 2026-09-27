@@ -20,7 +20,7 @@ import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { AdvisorStatusInfo, ContextUsage, GoalStatusInfo, SessionStatsInfo, SlashCommandInfo } from "@/lib/omp-types";
 import type { ModelRoleAssignment } from "@/lib/api-types";
 import { planSlashCommandIntent, planSlashCommandOutcome, type WebPlanModeInfo } from "@/lib/plan-mode-web";
-import { mergeQueued, reconcilePending, type OptimisticQueueEntry } from "@/lib/queue-optimistic";
+import { mergeQueued, reconcilePending, dropOneQueued, type OptimisticQueueEntry } from "@/lib/queue-optimistic";
 import { AUTO_FOLLOW_BOTTOM_THRESHOLD_PX, computeAutoFollow, distanceFromBottom } from "@/lib/chat-scroll";
 
 export interface SessionData {
@@ -1325,15 +1325,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
+          // The run's own initial prompt is the one that consumes the pending
+          // optimistic key set by handleSend; only that path must NOT touch the
+          // queue. Any user message_end with no optimistic key to consume is a
+          // genuine queued steer/follow-up delivery. Decide synchronously — the
+          // setMessages updater does not run inline.
+          const isQueuedDelivery = optimisticKey === null;
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
+              // The run's own initial prompt — already shown optimistically.
               return optimisticKey === deliveredKey
                 ? prev
                 : [...prev.slice(0, -1), delivered];
             }
             return [...prev, delivered];
           });
+          if (isQueuedDelivery) {
+            // pi does not reliably emit a queue_update after delivering a queued
+            // message, so drop one matching entry here to keep the chip in sync.
+            const { server, pending } = dropOneQueued(
+              serverQueueRef.current,
+              pendingQueueRef.current,
+              extractMessageText(delivered),
+            );
+            serverQueueRef.current = server;
+            pendingQueueRef.current = pending;
+            setQueuedMessages(mergeQueued(server, pending));
+          }
         } else if (completed) {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         }

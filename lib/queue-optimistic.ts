@@ -49,6 +49,48 @@ export function mergeQueued(
  * one server slot per pending entry so duplicate texts reconcile one at a time),
  * returning the entries still awaiting confirmation.
  */
+/**
+ * Remove a single queued entry whose (trimmed) text matches `text`, used when pi
+ * delivers a queued steer/follow-up as a chat message but does not emit a
+ * follow-up `queue_update` shrinking the queue.
+ *
+ * A server slot is preferred over a pending optimistic entry (the server is the
+ * authority); only one entry is dropped per call so duplicate texts disappear
+ * one delivery at a time. When nothing matches the queue is returned unchanged.
+ */
+export function dropOneQueued(
+  server: QueueSnapshot | null | undefined,
+  pending: readonly OptimisticQueueEntry[],
+  text: string,
+): { server: QueueSnapshot; pending: OptimisticQueueEntry[] } {
+  const base = server ?? EMPTY;
+  const target = text.trim();
+  const nextServer: QueueSnapshot = {
+    steering: [...base.steering],
+    followUp: [...base.followUp],
+  };
+
+  // Prefer a server slot, checking steering then follow-up.
+  for (const kind of ["steering", "followUp"] as const) {
+    const index = nextServer[kind].findIndex((entry) => entry.trim() === target);
+    if (index >= 0) {
+      nextServer[kind].splice(index, 1);
+      return { server: nextServer, pending: [...pending] };
+    }
+  }
+
+  // Otherwise drop the first matching pending optimistic entry.
+  const pendingIndex = pending.findIndex((entry) => entry.text.trim() === target);
+  if (pendingIndex >= 0) {
+    const nextPending = [...pending];
+    nextPending.splice(pendingIndex, 1);
+    return { server: nextServer, pending: nextPending };
+  }
+
+  // No match — leave the queue untouched.
+  return { server: nextServer, pending: [...pending] };
+}
+
 export function reconcilePending(
   pending: readonly OptimisticQueueEntry[],
   server: QueueSnapshot | null | undefined,
