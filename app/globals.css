@@ -587,6 +587,11 @@ pre, code {
   text-align: left;
   cursor: pointer;
   color: inherit;
+  background: none;
+}
+.shell-command-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .shell-output-preview[data-expanded="false"] .shell-command-line {
   align-items: center;
@@ -627,20 +632,26 @@ pre, code {
   line-height: 1.55;
   user-select: none;
 }
-.shell-command-line > span[style] {
-  flex: 1;
-  min-width: 0;
-}
-.shell-command-line code {
-  font-family: var(--font-mono) !important;
-}
 .shell-command-code {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
-  overflow: visible !important;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  /* Collapsed: keep the command on one line, ellipsized. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Selectable/copyable even though the row toggles on click. */
+  user-select: text;
 }
-.shell-command-code code {
-  font-family: var(--font-mono) !important;
+.shell-output-preview[data-expanded="true"] .shell-command-code {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
 }
 .shell-local-label {
   flex: 0 0 auto;

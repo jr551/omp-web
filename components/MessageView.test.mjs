@@ -78,11 +78,10 @@ test("renders shell blocks as themed terminal content, collapsed by default", ()
     ),
   );
 
-  // Command block renders as a themed console with a collapsible toggle.
+  // Command block renders the command in a selectable <code>, with a collapsible toggle.
   assert.match(html, /class="shell-output-preview"/);
-  assert.match(html, /git<\/span>/);
-  assert.match(html, /--short/);
-  // Collapsed by default: the toggle button reports aria-expanded="false".
+  assert.match(html, /class="shell-command-code">git status --short<\/code>/);
+  // Collapsed by default: the toggle reports aria-expanded="false".
   assert.match(html, /class="shell-command-line shell-command-toggle"/);
   assert.match(html, /aria-expanded="false"/);
   // While collapsed the header shows the command plus a one-line output preview…

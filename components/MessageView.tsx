@@ -1,12 +1,9 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vs, vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { MarkdownBody } from "./MarkdownBody";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
-import { useTheme } from "@/hooks/useTheme";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { getAssistantErrorMessage, isHiddenAssistantBlock } from "@/lib/message-display";
 import { useDisplaySettings } from "@/hooks/useDisplaySettings";
@@ -1320,7 +1317,6 @@ function ConsoleOutputPreview({
   duration?: number;
   local?: boolean;
 }) {
-  const { isDark } = useTheme();
   const { t } = useI18n();
   const [expanded, toggleExpanded] = useCommandBlockExpanded(blockKey);
   const normalizedLines = normalizeCustomPanelLines(output.split(/\r?\n/));
@@ -1332,40 +1328,24 @@ function ConsoleOutputPreview({
 
   return (
     <div className={`shell-output-preview${isError ? " is-error" : ""}`} data-expanded={expanded}>
-      <button
-        type="button"
+      {/* A div (not a button) so the command text stays selectable/copyable; a
+          plain click toggles, a drag-select does not (click never fires after a
+          drag), and Enter/Space keep it keyboard-operable. */}
+      <div
         className="shell-command-line shell-command-toggle"
+        role="button"
+        tabIndex={0}
         aria-expanded={expanded}
         onClick={toggleExpanded}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggleExpanded();
+          }
+        }}
       >
         <span className="shell-command-prompt" aria-hidden="true">$</span>
-        <SyntaxHighlighter
-          className="shell-command-code"
-          language="bash"
-          style={isDark ? vscDarkPlus : vs}
-          PreTag="span"
-          CodeTag="span"
-          wrapLongLines
-          customStyle={{
-            flex: expanded ? 1 : "0 1 auto",
-            minWidth: 0,
-            margin: 0,
-            padding: 0,
-            border: "none",
-            overflow: "hidden",
-            background: "transparent",
-            color: "var(--text)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 13,
-            lineHeight: 1.55,
-            whiteSpace: expanded ? "pre-wrap" : "nowrap",
-            textOverflow: expanded ? "clip" : "ellipsis",
-            overflowWrap: "anywhere",
-          }}
-          codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-        >
-          {command || " "}
-        </SyntaxHighlighter>
+        <code className="shell-command-code">{command || " "}</code>
         {collapsedPreview && <span className="shell-collapsed-preview">{collapsedPreview}</span>}
         <span className="shell-command-spacer" />
         {local && <span className="shell-local-label">local</span>}
@@ -1390,7 +1370,7 @@ function ConsoleOutputPreview({
         >
           <polyline points="2 3.5 5 6.5 8 3.5" />
         </svg>
-      </button>
+      </div>
 
       {expanded && (
       <div className="shell-output-panel">
