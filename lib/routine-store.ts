@@ -452,6 +452,27 @@ export function recordRun(id: string, run: RoutineRun, agentDir?: string): Routi
   return updated;
 }
 
+/**
+ * Merge imported routines into the store (git pull sync): dedupe by id, newest
+ * `updatedAt` wins. Only well-formed routines are adopted; unknown/older ones
+ * are ignored. Returns the number of routines added or updated.
+ */
+export function mergeRoutinesIntoStore(incoming: Routine[], agentDir?: string): number {
+  const dir = resolveAgentDir(agentDir);
+  const store = getStore(dir);
+  let changed = 0;
+  for (const routine of incoming) {
+    const migrated = migrateRoutine(routine);
+    if (!migrated) continue;
+    const existing = store.get(migrated.id);
+    if (existing && Date.parse(migrated.updatedAt) <= Date.parse(existing.updatedAt)) continue;
+    store.set(migrated.id, migrated);
+    changed += 1;
+  }
+  if (changed > 0) persist(dir, store);
+  return changed;
+}
+
 /** Test-only: reset the in-memory cache so a test can point at a fresh dir. */
 export function __resetRoutineStoreForTests(): void {
   globalThis.__ompRoutines = undefined;
