@@ -478,10 +478,45 @@ omp-web can run a prompt in a project unattended, on a schedule or a condition.
   `omp-web:collapsed-routine-sections`. Keep the sidebar memo rules — the new
   `onOpenRoutines` prop is a stable `useCallback` and rows are plain
   subcomponents with stable handlers.
+- **Routines are conversations, at the TOP of each project.** The Routines
+  subsection renders **above** the sessions of its project group, and each
+  routine is a conversation-style clock-icon row. Clicking the row opens the
+  **Routine activity view** (`components/RoutineActivityView.tsx`) in the main
+  area — "one chat per routine": runs newest-first (status badge, summary,
+  timestamps, duration) with a per-run "Open transcript" button when the run
+  recorded a `sessionId`. Ordering/scroll-target/duration are pure helpers in
+  `lib/routine-activity.ts` (unit tested). Opening it flows AppShell
+  `activeRoutineId` ← `onOpenRoutineActivity` (a stable sidebar `useCallback`);
+  it is mutually exclusive with an open chat. "Open transcript" reuses the normal
+  session-load path (`handleOpenSessionById` → `/api/sessions` → `handleSelectSession`).
+  The RoutinesConfig editor stays reachable via the row's hover Edit action and
+  the section "+" / footer button.
 - **Scratch projects** (`lib/scratch-project.ts`): `~/omp-cwd-YYYYMMDD` and
   temp-dir roots render as "Non Project Related" (i18n `sidebar.nonProjectRelated`),
   pinned to the top of the sidebar with a muted `--warning` folder icon.
-- i18n keys live under `routines.*` in `lib/i18n/messages/{en,zh-CN}.ts`.
+  `collapseScratchGroups()` (pure, unit tested) merges **every** scratch root
+  into a SINGLE "Non Project Related" group (sessions + routines combined) so
+  multiple scratch dirs never render as duplicate groups.
+- **Pending 😎 badge**: `GET /api/wakes` returns pending `smartwake` wakes
+  grouped by `sessionId`/`cwd` (browser-safe fields only — never the stored
+  message/pollCommand; `summarizePendingWakes` in `lib/wake-types.ts`, unit
+  tested). The sidebar and AppShell poll it on the running-poll cadence (~2.5s,
+  paused when hidden) and show a 😎 badge on any session row / chat header whose
+  session has a pending wake, and on routine rows that are running, have an
+  imminent cron firing, or one of whose run sessions has a pending wake
+  (`isRoutinePending`).
+- **Routines git sync** (`lib/routine-git.ts`): export the routine store to
+  `omp-web-routines.json` in a target git repo and commit/push, or pull and
+  merge it back. `mergeRoutines`/`serializeRoutines`/`parseRoutines` and the
+  git-driven `exportRoutines`/`importRoutines` are pure with an injected git
+  runner + file-IO shim (unit tested, no real git). `POST /api/routines/sync`
+  `{ direction: "push"|"pull", repoDir, remote?, branch? }` validates `repoDir`
+  via the allowed-roots helper and runs `git` through the same `execFile`
+  pattern (30s timeout, `LC_ALL=C`) as `lib/worktree.ts`; pull merges via
+  `mergeRoutinesIntoStore` (dedupe by id, newest `updatedAt` wins). The
+  RoutinesConfig modal has a "Sync with git" section (repo dir + remote/branch +
+  Push/Pull + status).
+- i18n keys live under `routines.*` / `wakes.*` in `lib/i18n/messages/{en,zh-CN}.ts`.
 
 **Webhooks (incoming + outgoing ask).**
 - **External URL** (`lib/omp-web-config.ts`): omp-web's own config store at

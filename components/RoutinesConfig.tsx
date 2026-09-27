@@ -137,6 +137,11 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
   const [externalUrl, setExternalUrl] = useState("");
   const [resolvedBaseUrl, setResolvedBaseUrl] = useState("");
   const [externalUrlSaving, setExternalUrlSaving] = useState(false);
+  const [syncRepoDir, setSyncRepoDir] = useState("");
+  const [syncRemote, setSyncRemote] = useState("");
+  const [syncBranch, setSyncBranch] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadRoutines = useCallback(async () => {
@@ -312,6 +317,38 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
     }
   }, [selectedId, loadRoutines]);
 
+  const runSync = useCallback(async (direction: "push" | "pull") => {
+    const repoDir = syncRepoDir.trim();
+    if (!repoDir || syncBusy) return;
+    setSyncBusy(true);
+    setSyncStatus(null);
+    setError(null);
+    try {
+      const response = await fetch("/api/routines/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          direction,
+          repoDir,
+          ...(syncRemote.trim() ? { remote: syncRemote.trim() } : {}),
+          ...(syncBranch.trim() ? { branch: syncBranch.trim() } : {}),
+        }),
+      });
+      const data = await response.json() as { error?: string; committed?: boolean; pushed?: boolean; merged?: number };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      if (direction === "push") {
+        setSyncStatus(data.committed ? t("routines.syncPushed") : t("routines.syncPushedNoChange"));
+      } else {
+        setSyncStatus(t("routines.syncPulled", { count: data.merged ?? 0 }));
+        await loadRoutines();
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSyncBusy(false);
+    }
+  }, [syncRepoDir, syncRemote, syncBranch, syncBusy, loadRoutines, t]);
+
   const runNow = useCallback(async () => {
     if (selectedId === "new" || !selectedId) return;
     try {
@@ -363,6 +400,40 @@ export function RoutinesConfig({ initialCwd, initialRoutineId, onClose }: Routin
                 onBlur={(event) => void saveExternalUrl(event.target.value)}
               />
               <span className={styles.fieldHint}>{t("routines.externalUrlHint")}</span>
+            </div>
+            <div className={styles.field} style={{ marginTop: 12 }}>
+              <label className={styles.fieldLabel}>{t("routines.gitSync")}</label>
+              <input
+                className={styles.textInput}
+                value={syncRepoDir}
+                placeholder={t("routines.repoDir")}
+                spellCheck={false}
+                disabled={syncBusy}
+                onChange={(event) => setSyncRepoDir(event.target.value)}
+              />
+              <div className={styles.fieldRow} style={{ marginTop: 6 }}>
+                <input
+                  className={styles.textInput}
+                  value={syncRemote}
+                  placeholder={t("routines.gitRemote")}
+                  spellCheck={false}
+                  disabled={syncBusy}
+                  onChange={(event) => setSyncRemote(event.target.value)}
+                />
+                <input
+                  className={styles.textInput}
+                  value={syncBranch}
+                  placeholder={t("routines.gitBranch")}
+                  spellCheck={false}
+                  disabled={syncBusy}
+                  onChange={(event) => setSyncBranch(event.target.value)}
+                />
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button type="button" className={styles.secondaryButton} disabled={syncBusy || !syncRepoDir.trim()} onClick={() => void runSync("push")}>{t("routines.push")}</button>
+                <button type="button" className={styles.secondaryButton} disabled={syncBusy || !syncRepoDir.trim()} onClick={() => void runSync("pull")}>{t("routines.pull")}</button>
+              </div>
+              <span className={styles.fieldHint}>{syncBusy ? t("routines.syncBusy") : syncStatus ?? t("routines.gitSyncHint")}</span>
             </div>
           </div>
           <div className={styles.list}>

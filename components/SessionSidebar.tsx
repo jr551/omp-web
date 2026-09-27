@@ -6,8 +6,8 @@ import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { useI18n } from "@/hooks/useI18n";
-import { isScratchProjectRoot } from "@/lib/scratch-project";
-import { describeCron } from "@/lib/cron";
+import { collapseScratchGroups, isScratchProjectRoot } from "@/lib/scratch-project";
+import { describeCron, parseCron, cronMatches } from "@/lib/cron";
 import type { RoutineWithStatus, RoutineTrigger } from "@/lib/routine-types";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -102,6 +102,10 @@ interface Props {
   onBackgroundTaskDone?: () => void;
   /** Open the Routines manager, optionally pre-selecting a routine to edit. */
   onOpenRoutines?: (routineId?: string) => void;
+  /** Open a routine's activity view (one chat per routine) in the main area. */
+  onOpenRoutineActivity?: (routineId: string) => void;
+  /** The routine whose activity view is currently open (for row highlight). */
+  selectedRoutineId?: string | null;
 }
 
 interface WorktreeEntry {
@@ -158,8 +162,47 @@ function routineTriggerSummary(trigger: RoutineTrigger, t: (key: string, params?
   return t("routines.webhookSummary");
 }
 
+/** Whether a cron routine's next firing is within one minute of `now`. */
+function isCronImminent(trigger: RoutineTrigger, now: Date): boolean {
+  if (trigger.type !== "cron") return false;
+  const spec = parseCron(trigger.schedule);
+  if ("error" in spec) return false;
+  return cronMatches(spec, now) || cronMatches(spec, new Date(now.getTime() + 60_000));
+}
+
+/**
+ * Whether a routine should show the pending 😎 indicator: a run in flight, an
+ * imminent scheduled cron firing, or one of its runs' sessions has a pending
+ * smartwake.
+ */
+function isRoutinePending(routine: RoutineWithStatus, pendingWakeSessions: Set<string>): boolean {
+  if (routine.running) return true;
+  if (isCronImminent(routine.trigger, new Date())) return true;
+  if (pendingWakeSessions.size > 0) {
+    if (routine.lastRun?.sessionId && pendingWakeSessions.has(routine.lastRun.sessionId)) return true;
+    if (routine.history?.some((run) => run.sessionId && pendingWakeSessions.has(run.sessionId))) return true;
+  }
+  return false;
+}
+
+/** A small sunglasses badge marking a pending smartwake. */
+function SunglassesBadge({ title }: { title: string }) {
+  return (
+    <span
+      title={title}
+      aria-label={title}
+      style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 12, lineHeight: 1 }}
+    >
+      😎
+    </span>
+  );
+}
+
 interface RoutineSidebarRowProps {
   routine: RoutineWithStatus;
+  selected: boolean;
+  pending: boolean;
+  onOpenActivity: (id: string) => void;
   onRunNow: (id: string) => void;
   onToggleEnabled: (routine: RoutineWithStatus) => void;
   onDelete: (routine: RoutineWithStatus) => void;
@@ -167,7 +210,7 @@ interface RoutineSidebarRowProps {
   t: (key: string, params?: Record<string, string | number>) => string;
 }
 
-function RoutineSidebarRow({ routine, onRunNow, onToggleEnabled, onDelete, onEdit, t }: RoutineSidebarRowProps) {
+function RoutineSidebarRow({ routine, selected, pending, onOpenActivity, onRunNow, onToggleEnabled, onDelete, onEdit, t }: RoutineSidebarRowProps) {
   const [hovered, setHovered] = useState(false);
   const summary = routine.lastRun?.summary
     || routineTriggerSummary(routine.trigger, t)
@@ -183,12 +226,16 @@ function RoutineSidebarRow({ routine, onRunNow, onToggleEnabled, onDelete, onEdi
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      style={{ display: "flex", alignItems: "center", gap: 7, padding: "4px 6px", borderRadius: 6, background: hovered ? "var(--bg-hover)" : "transparent" }}
+      style={{
+        display: "flex", alignItems: "center", gap: 7, padding: "4px 6px", borderRadius: 6,
+        borderLeft: selected ? "2px solid var(--accent)" : "2px solid transparent",
+        background: selected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
+      }}
     >
       <button
         type="button"
-        onClick={() => onEdit(routine.id)}
-        title={summary}
+        onClick={() => onOpenActivity(routine.id)}
+        title={t("routines.viewActivity")}
         style={{ display: "flex", alignItems: "center", gap: 7, flex: 1, minWidth: 0, padding: 0, border: "none", background: "transparent", cursor: "pointer", textAlign: "left" }}
       >
         <span style={{ flexShrink: 0, display: "flex", width: 14, height: 14, color: routine.enabled ? "var(--accent)" : "var(--text-dim)" }}>
@@ -217,10 +264,15 @@ function RoutineSidebarRow({ routine, onRunNow, onToggleEnabled, onDelete, onEdi
               ? <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
               : <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5v14l11-7z" /></svg>}
           </RoutineRowButton>
+          <RoutineRowButton title={t("routines.edit")} onClick={() => onEdit(routine.id)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+          </RoutineRowButton>
           <RoutineRowButton title={t("routines.delete")} onClick={() => onDelete(routine)}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13" /></svg>
           </RoutineRowButton>
         </span>
+      ) : pending ? (
+        <SunglassesBadge title={t("wakes.pending")} />
       ) : (
         <span style={{ flexShrink: 0, width: 7, height: 7, borderRadius: "50%", background: statusColor }} />
       )}
@@ -587,7 +639,7 @@ function PiWebTitle() {
 
 // memo: AppShell re-renders on file-tab switches and top-bar state; every prop
 // here is a stable callback or a value the sidebar renders, so skip those.
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenRoutines }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenRoutines, onOpenRoutineActivity, selectedRoutineId }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionsForDisplay = useMemo(
@@ -630,6 +682,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [pendingWakeSessions, setPendingWakeSessions] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Once polling has delivered a snapshot it is the source of truth for
@@ -701,6 +754,49 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, [loadRoutines, t]);
 
   const handleRoutineEdit = useCallback((id: string) => { onOpenRoutines?.(id); }, [onOpenRoutines]);
+  const handleRoutineOpenActivity = useCallback((id: string) => { onOpenRoutineActivity?.(id); }, [onOpenRoutineActivity]);
+
+  // Poll pending smartwakes on the running-poll cadence (2.5s, paused when the
+  // tab is hidden) to drive the 😎 badges on session and routine rows.
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (stopped || document.visibilityState !== "visible") return;
+      timer = setTimeout(() => void poll(), RUNNING_SESSIONS_POLL_MS);
+    };
+
+    const poll = async () => {
+      if (stopped || document.visibilityState !== "visible") return;
+      try {
+        const res = await fetch("/api/wakes", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json() as { bySession?: Record<string, unknown> };
+          if (!stopped) setPendingWakeSessions(new Set(Object.keys(data.bySession ?? {})));
+        }
+      } catch {
+        // Keep the last known set; the next visible-tab poll retries.
+      } finally {
+        schedule();
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void poll();
+      else if (timer) { clearTimeout(timer); timer = null; }
+    };
+
+    void poll();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
 
 
   const loadSessions = useCallback(async (showLoading = false, force = false) => {
@@ -1148,44 +1244,38 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     else sessionsByProject.set(project, [session]);
   }
 
-  // Per-project activity counts (running / unread) for the project rows, keyed
-  // the same way as getRecentProjects (projectRoot ?? cwd). Small data set —
-  // cheap to recompute.
-  const projectActivity = useMemo(() => {
-    const counts = new Map<string, { running: number; unread: number }>();
-    for (const session of sessionsForDisplay) {
-      const key = session.projectRoot ?? session.cwd;
-      if (!key) continue;
-      let entry = counts.get(key);
-      if (!entry) { entry = { running: 0, unread: 0 }; counts.set(key, entry); }
-      if (runningSessionIds.has(session.id)) entry.running++;
-      if (unreadSessionIds.has(session.id)) entry.unread++;
-    }
-    return counts;
-  }, [sessionsForDisplay, runningSessionIds, unreadSessionIds]);
-
   const routinesByProject = groupRoutinesByProject(routines, projectPaths);
 
   const normalizedProjectFilter = projectFilter.trim().toLowerCase();
-  const projectGroups = projectPaths.flatMap((project) => {
+  const rawProjectGroups = projectPaths.flatMap((project) => {
     const segments = project.replace(/[\\/]+$/, "").split(/[\\/]/);
     const isScratch = isScratchProjectRoot(project, homeDir || undefined);
     // Scratch/default dirs read as one bucket rather than a throwaway basename.
     const name = isScratch ? t("sidebar.nonProjectRelated") : (segments.at(-1) || project);
     const sessions = sessionsByProject.get(project) ?? [];
-    if (!normalizedProjectFilter) return [{ project, name, sessions, isScratch }];
+    const routinesForProject = routinesByProject.get(project) ?? [];
+    if (!normalizedProjectFilter) return [{ project, name, sessions, routines: routinesForProject, isScratch }];
 
     const projectMatches = name.toLowerCase().includes(normalizedProjectFilter);
     const matchingSessions = sessions.filter((session) => {
       const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
       return title.toLowerCase().includes(normalizedProjectFilter);
     });
-    if (!projectMatches && matchingSessions.length === 0) return [];
-    return [{ project, name, sessions: projectMatches ? sessions : matchingSessions, isScratch }];
-  })
-    // Pin "Non Project Related" groups to the very top; sort is stable so the
-    // recency order within each partition is preserved.
-    .sort((a, b) => Number(b.isScratch) - Number(a.isScratch));
+    const matchingRoutines = routinesForProject.filter((routine) => routine.name.toLowerCase().includes(normalizedProjectFilter));
+    if (!projectMatches && matchingSessions.length === 0 && matchingRoutines.length === 0) return [];
+    return [{
+      project,
+      name,
+      sessions: projectMatches ? sessions : matchingSessions,
+      routines: projectMatches ? routinesForProject : matchingRoutines,
+      isScratch,
+    }];
+  });
+  // Collapse ALL scratch roots (~/omp-cwd-*, temp dirs) into a SINGLE "Non
+  // Project Related" group, pinned to the very top. Non-scratch groups keep
+  // their recency order.
+  const selectedIsScratch = isScratchProjectRoot(selectedProject, homeDir || undefined);
+  const projectGroups = collapseScratchGroups(rawProjectGroups, t("sidebar.nonProjectRelated"));
 
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
@@ -1414,9 +1504,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             {normalizedProjectFilter ? t("sidebar.noMatchingProjects") : t("sidebar.noSessions")}
           </div>
         )}
-        {!loading && !error && projectGroups.map(({ project, name, sessions, isScratch }) => {
-          const isSelectedProject = project === selectedProject;
-          const projectRoutines = routinesByProject.get(project) ?? [];
+        {!loading && !error && projectGroups.map(({ project, name, sessions, routines: projectRoutines, isScratch }) => {
+          const isSelectedProject = project === selectedProject || (isScratch && selectedIsScratch);
           const routinesCollapsed = collapsedRoutineSections.has(project);
           const isCollapsed = collapsedProjects.has(project) && !normalizedProjectFilter;
           const isExpanded = expandedProjects.has(project);
@@ -1500,7 +1589,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                     <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z" />
                   </svg>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
-                  {showProjectActivity(projectActivity.get(project), t)}
+                  {showProjectActivity(computeGroupActivity(sessions, runningSessionIds, unreadSessionIds), t)}
                 </button>
 
                 <button
@@ -1924,6 +2013,55 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 )}
               </div>
 
+              {!isCollapsed && projectRoutines.length > 0 && (
+                <div style={{ paddingLeft: 12, marginBottom: 3 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "1px 4px" }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleRoutineSection(project)}
+                      title={routinesCollapsed ? t("routines.showSection") : t("routines.hideSection")}
+                      aria-expanded={!routinesCollapsed}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0, height: 24,
+                        padding: "0 4px", border: "none", background: "transparent",
+                        color: "var(--text-dim)", cursor: "pointer", textAlign: "left",
+                        font: "600 10px/1 var(--font-mono)", letterSpacing: "0.06em", textTransform: "uppercase",
+                      }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: routinesCollapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.12s", flexShrink: 0 }}>
+                        <polyline points="2.5 4 6 7.5 9.5 4" />
+                      </svg>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+                        <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+                      </svg>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("routines.sectionTitle")} · {projectRoutines.length}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenRoutines?.()}
+                      title={t("routines.add")}
+                      aria-label={t("routines.add")}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, border: "none", background: "transparent", color: "var(--text-dim)", cursor: "pointer", flexShrink: 0 }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><line x1="6" y1="1.5" x2="6" y2="10.5" /><line x1="1.5" y1="6" x2="10.5" y2="6" /></svg>
+                    </button>
+                  </div>
+                  {!routinesCollapsed && projectRoutines.map((routine) => (
+                    <RoutineSidebarRow
+                      key={routine.id}
+                      routine={routine}
+                      selected={routine.id === selectedRoutineId}
+                      pending={isRoutinePending(routine, pendingWakeSessions)}
+                      onOpenActivity={handleRoutineOpenActivity}
+                      onRunNow={handleRoutineRunNow}
+                      onToggleEnabled={handleRoutineToggleEnabled}
+                      onDelete={handleRoutineDelete}
+                      onEdit={handleRoutineEdit}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              )}
               {!isCollapsed && sessions.length === 0 && isSelectedProject && (
                 <div style={{ padding: "6px 12px 7px 32px", color: "var(--text-dim)", fontSize: 11 }}>
                   {t("sidebar.noSessions")}
@@ -1938,6 +2076,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                       selectedSessionId={selectedSessionId}
                       runningSessionIds={runningSessionIds}
                       unreadSessionIds={unreadSessionIds}
+                      pendingWakeSessions={pendingWakeSessions}
                       onSelectSession={handleSelectSessionFromList}
                       onRenamed={loadSessions}
                       onSessionDeleted={(id) => {
@@ -1975,52 +2114,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 >
                   {isExpanded ? t("sidebar.showLess") : t("sidebar.showMore")}
                 </button>
-              )}
-              {!isCollapsed && projectRoutines.length > 0 && (
-                <div style={{ paddingLeft: 12, marginTop: 3 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "1px 4px" }}>
-                    <button
-                      type="button"
-                      onClick={() => toggleRoutineSection(project)}
-                      title={routinesCollapsed ? t("routines.showSection") : t("routines.hideSection")}
-                      aria-expanded={!routinesCollapsed}
-                      style={{
-                        display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0, height: 24,
-                        padding: "0 4px", border: "none", background: "transparent",
-                        color: "var(--text-dim)", cursor: "pointer", textAlign: "left",
-                        font: "600 10px/1 var(--font-mono)", letterSpacing: "0.06em", textTransform: "uppercase",
-                      }}
-                    >
-                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: routinesCollapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.12s", flexShrink: 0 }}>
-                        <polyline points="2.5 4 6 7.5 9.5 4" />
-                      </svg>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
-                        <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
-                      </svg>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("routines.sectionTitle")} · {projectRoutines.length}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenRoutines?.()}
-                      title={t("routines.add")}
-                      aria-label={t("routines.add")}
-                      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, border: "none", background: "transparent", color: "var(--text-dim)", cursor: "pointer", flexShrink: 0 }}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><line x1="6" y1="1.5" x2="6" y2="10.5" /><line x1="1.5" y1="6" x2="10.5" y2="6" /></svg>
-                    </button>
-                  </div>
-                  {!routinesCollapsed && projectRoutines.map((routine) => (
-                    <RoutineSidebarRow
-                      key={routine.id}
-                      routine={routine}
-                      onRunNow={handleRoutineRunNow}
-                      onToggleEnabled={handleRoutineToggleEnabled}
-                      onDelete={handleRoutineDelete}
-                      onEdit={handleRoutineEdit}
-                      t={t}
-                    />
-                  ))}
-                </div>
               )}
             </section>
           );
@@ -2275,6 +2368,7 @@ function SessionTreeItem({
   selectedSessionId,
   runningSessionIds,
   unreadSessionIds,
+  pendingWakeSessions,
   onSelectSession,
   onRenamed,
   onSessionDeleted,
@@ -2285,6 +2379,7 @@ function SessionTreeItem({
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
+  pendingWakeSessions: Set<string>;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
@@ -2313,6 +2408,7 @@ function SessionTreeItem({
           isSelected={node.session.id === selectedSessionId}
           isRunning={runningSessionIds.has(node.session.id)}
           isUnread={unreadSessionIds.has(node.session.id)}
+          isPendingWake={pendingWakeSessions.has(node.session.id)}
           onClick={() => onSelectSession(node.session)}
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
@@ -2332,6 +2428,7 @@ function SessionTreeItem({
               selectedSessionId={selectedSessionId}
               runningSessionIds={runningSessionIds}
               unreadSessionIds={unreadSessionIds}
+              pendingWakeSessions={pendingWakeSessions}
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
@@ -2416,6 +2513,21 @@ function UnreadSessionIndicator() {
  * when the project has no activity. Counts share the accent / unread colors of
  * the per-session indicators so the two stay visually consistent.
  */
+/** Running/unread counts for a group's sessions (works for the merged scratch group too). */
+function computeGroupActivity(
+  sessions: SessionInfo[],
+  runningSessionIds: Set<string>,
+  unreadSessionIds: Set<string>,
+): { running: number; unread: number } | undefined {
+  let running = 0;
+  let unread = 0;
+  for (const session of sessions) {
+    if (runningSessionIds.has(session.id)) running++;
+    if (unreadSessionIds.has(session.id)) unread++;
+  }
+  return running === 0 && unread === 0 ? undefined : { running, unread };
+}
+
 function showProjectActivity(
   activity: { running: number; unread: number } | undefined,
   t: (key: string) => string,
@@ -2457,6 +2569,7 @@ function SessionItem({
   isSelected,
   isRunning,
   isUnread,
+  isPendingWake,
   onClick,
   onRenamed,
   onDeleted,
@@ -2470,6 +2583,7 @@ function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  isPendingWake?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -2713,6 +2827,7 @@ function SessionItem({
             <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {title}
             </span>
+            {isPendingWake && <SunglassesBadge title={t("wakes.pending")} />}
             {isRunning && <RunningSessionIndicator />}
             {!isRunning && isUnread && <UnreadSessionIndicator />}
             {session.worktreeBranch && (

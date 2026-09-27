@@ -10,6 +10,7 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { SettingsConfig } from "./SettingsConfig";
 import { RoutinesConfig } from "./RoutinesConfig";
+import { RoutineActivityView } from "./RoutineActivityView";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { OmpUpdateIndicator } from "./OmpUpdateIndicator";
 import { BranchNavigator } from "./BranchNavigator";
@@ -123,6 +124,12 @@ export function AppShell() {
     setRoutinesInitialId(routineId ?? null);
     setRoutinesConfigOpen(true);
   }, []);
+  // The routine whose activity view (one chat per routine) is open in the main
+  // area, if any. Mutually exclusive with an open chat session.
+  const [activeRoutineId, setActiveRoutineId] = useState<string | null>(null);
+  // Session ids with a pending smartwake, polled from /api/wakes to badge the
+  // open session's chat header with 😎.
+  const [pendingWakeSessions, setPendingWakeSessions] = useState<Set<string>>(() => new Set());
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
@@ -514,6 +521,7 @@ export function AppShell() {
     }
     // Close any session that belongs to a different project — it no longer
     // matches the selected project directory.
+    setActiveRoutineId(null);
     setSelectedSession(null);
     setNewSessionCwd((prev) => {
       if (prev && prev !== cwd) return null;
@@ -558,6 +566,7 @@ export function AppShell() {
       }
     }
     setNewSessionCwd(null);
+    setActiveRoutineId(null);
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
@@ -578,6 +587,7 @@ export function AppShell() {
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     invalidateWorkspaceRestore();
+    setActiveRoutineId(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
@@ -588,6 +598,29 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
     router.replace("/", { scroll: false });
   }, [invalidateWorkspaceRestore, router, isMobile]);
+
+  // Open a routine's activity view in the main area (mutually exclusive with a
+  // chat session). Selecting a session/new chat clears it again.
+  const handleOpenRoutineActivity = useCallback((routineId: string) => {
+    invalidateWorkspaceRestore();
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setActiveTopPanel(null);
+    setActiveRoutineId(routineId);
+    if (isMobile) setSidebarOpen(false);
+  }, [invalidateWorkspaceRestore, isMobile]);
+
+  // Open a run's transcript by its session id, reusing the normal session-load
+  // path: fetch the session list, find the SessionInfo, and select it.
+  const handleOpenSessionById = useCallback((sessionId: string) => {
+    void fetch("/api/sessions", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
+      .then((d) => {
+        const target = d?.sessions.find((s) => s.id === sessionId);
+        if (target) handleSelectSession(target);
+      })
+      .catch(() => {});
+  }, [handleSelectSession]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -897,6 +930,46 @@ export function AppShell() {
     return () => observer.disconnect();
   }, [windowTitle]);
 
+  // Poll pending smartwakes (2.5s, paused when hidden) to badge the open
+  // session's chat header with 😎. Mirrors the sidebar's poll cadence.
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (stopped || document.visibilityState !== "visible") return;
+      timer = setTimeout(() => void poll(), 2500);
+    };
+    const poll = async () => {
+      if (stopped || document.visibilityState !== "visible") return;
+      try {
+        const res = await fetch("/api/wakes", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json() as { bySession?: Record<string, unknown> };
+          if (!stopped) setPendingWakeSessions(new Set(Object.keys(data.bySession ?? {})));
+        }
+      } catch {
+        // Keep the last known set; the next visible-tab poll retries.
+      } finally {
+        schedule();
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void poll();
+      else if (timer) { clearTimeout(timer); timer = null; }
+    };
+    void poll();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  const selectedSessionPendingWake = selectedSession ? pendingWakeSessions.has(selectedSession.id) : false;
+
   const sidebarContent = (
     <>
       <SessionSidebar
@@ -918,6 +991,8 @@ export function AppShell() {
         onAtMentions={handleAtMentions}
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onOpenRoutines={handleOpenRoutines}
+        onOpenRoutineActivity={handleOpenRoutineActivity}
+        selectedRoutineId={activeRoutineId}
       />
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
         <OmpUpdateIndicator />
@@ -1237,6 +1312,15 @@ export function AppShell() {
               </svg>
               {!isMobile && <span>{translate("trust.resourcesNotLoaded")}</span>}
             </button>
+          )}
+          {showChat && selectedSessionPendingWake && (
+            <div
+              title={translate("wakes.pending")}
+              aria-label={translate("wakes.pending")}
+              style={{ display: "flex", alignItems: "center", padding: "0 10px", borderRight: "1px solid var(--border)", fontSize: 15, lineHeight: 1, flexShrink: 0 }}
+            >
+              😎
+            </div>
           )}
           {showChat && (
             <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
@@ -1776,7 +1860,13 @@ export function AppShell() {
         {/* Chat content */}
         <div className="chat-content-layout">
           <div className="chat-session-column">
-          {showChat ? (
+          {activeRoutineId ? (
+            <RoutineActivityView
+              routineId={activeRoutineId}
+              onEdit={handleOpenRoutines}
+              onOpenSession={handleOpenSessionById}
+            />
+          ) : showChat ? (
             <ChatWindow
               key={sessionKey}
               session={selectedSession}
