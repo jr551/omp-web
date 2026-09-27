@@ -6,6 +6,8 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import {
   MAX_PENDING_WAKES_PER_SESSION,
   WAKE_TERMINAL_RETENTION_MS,
+  summarizePendingWakes,
+  type PendingWakesSummary,
   type ValidatedWake,
   type Wake,
   type WakeStatus,
@@ -165,6 +167,15 @@ export function listPendingWakes(agentDir?: string): Wake[] {
   return [...getStore(resolveAgentDir(agentDir)).values()]
     .filter((wake) => wake.status === "pending")
     .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/**
+ * Browser-safe summary of pending wakes, grouped by sessionId and cwd. The
+ * stored message/pollCommand are never included — see summarizePendingWakes.
+ * Drives the sidebar/chat-header pending 😎 indicators via GET /api/wakes.
+ */
+export function listPendingWakesSummary(agentDir?: string): PendingWakesSummary {
+  return summarizePendingWakes(listPendingWakes(agentDir));
 }
 
 /**

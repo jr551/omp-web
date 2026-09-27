@@ -231,6 +231,82 @@ export function humanizeDuration(ms: number): string {
   return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`;
 }
 
+// --- Safe listing (no message / pollCommand leaked to the browser) ------
+
+/**
+ * A pending wake trimmed to fields that are safe to expose to the browser: the
+ * stored `message` and `pollCommand` may contain sensitive content, so they are
+ * omitted. Used by GET /api/wakes to drive the pending 😎 indicators.
+ */
+export interface SafeWake {
+  id: string;
+  sessionId: string;
+  cwd: string;
+  mode: WakeMode;
+  fireAt?: number;
+  intervalMs?: number;
+  createdAt: number;
+  expiresAt: number;
+  status: WakeStatus;
+}
+
+export interface PendingWakesByKey {
+  count: number;
+  /** Earliest upcoming fire time among the wakes for this key (delayed mode). */
+  nextFireAt: number | null;
+}
+
+export interface PendingWakesSummary {
+  wakes: SafeWake[];
+  bySession: Record<string, PendingWakesByKey>;
+  byCwd: Record<string, PendingWakesByKey>;
+}
+
+/** Project a wake down to its browser-safe fields. */
+export function toSafeWake(wake: Wake): SafeWake {
+  return {
+    id: wake.id,
+    sessionId: wake.sessionId,
+    cwd: wake.cwd,
+    mode: wake.mode,
+    ...(typeof wake.fireAt === "number" ? { fireAt: wake.fireAt } : {}),
+    ...(typeof wake.intervalMs === "number" ? { intervalMs: wake.intervalMs } : {}),
+    createdAt: wake.createdAt,
+    expiresAt: wake.expiresAt,
+    status: wake.status,
+  };
+}
+
+/**
+ * Group pending wakes by sessionId and by cwd, tracking the count and the
+ * earliest upcoming fire time per key. Pure — the store passes its pending list
+ * in — so it is unit tested with plain objects.
+ */
+export function summarizePendingWakes(wakes: readonly Wake[]): PendingWakesSummary {
+  const safe: SafeWake[] = [];
+  const bySession: Record<string, PendingWakesByKey> = {};
+  const byCwd: Record<string, PendingWakesByKey> = {};
+
+  const bump = (bucket: Record<string, PendingWakesByKey>, key: string, fireAt?: number) => {
+    if (!key) return;
+    const entry = bucket[key] ?? { count: 0, nextFireAt: null };
+    entry.count += 1;
+    if (typeof fireAt === "number") {
+      entry.nextFireAt = entry.nextFireAt === null ? fireAt : Math.min(entry.nextFireAt, fireAt);
+    }
+    bucket[key] = entry;
+  };
+
+  for (const wake of wakes) {
+    if (wake.status !== "pending") continue;
+    safe.push(toSafeWake(wake));
+    bump(bySession, wake.sessionId, wake.fireAt);
+    bump(byCwd, wake.cwd, wake.fireAt);
+  }
+
+  return { wakes: safe, bySession, byCwd };
+}
+
 /** A one-line human summary of a scheduled wake (returned by the tool). */
 export function summarizeWake(wake: Pick<Wake, "mode" | "fireAt" | "pollCommand" | "intervalMs" | "expiresAt">, now: number): string {
   const expiresIn = humanizeDuration(wake.expiresAt - now);
