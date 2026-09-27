@@ -45,11 +45,6 @@ export function mergeQueued(
 }
 
 /**
- * Drop pending entries the server now reports (matched greedily by kind + text,
- * one server slot per pending entry so duplicate texts reconcile one at a time),
- * returning the entries still awaiting confirmation.
- */
-/**
  * Remove a single queued entry whose (trimmed) text matches `text`, used when pi
  * delivers a queued steer/follow-up as a chat message but does not emit a
  * follow-up `queue_update` shrinking the queue.
@@ -91,6 +86,11 @@ export function dropOneQueued(
   return { server: nextServer, pending: [...pending] };
 }
 
+/**
+ * Drop pending entries the server now reports (matched greedily by kind + text,
+ * one server slot per pending entry so duplicate texts reconcile one at a time),
+ * returning the entries still awaiting confirmation.
+ */
 export function reconcilePending(
   pending: readonly OptimisticQueueEntry[],
   server: QueueSnapshot | null | undefined,
