@@ -58,6 +58,17 @@ function LoginForm() {
       <h1 className={styles.title}>Sign in</h1>
       <p className={styles.lead}>omp-web is locked. Enter your password to continue.</p>
       {error && <p className={styles.error} role="alert">{error}</p>}
+      {/* Hidden username so password managers and a11y tooling have a complete form. */}
+      <input
+        type="text"
+        name="username"
+        value="omp"
+        autoComplete="username"
+        readOnly
+        aria-hidden="true"
+        tabIndex={-1}
+        style={{ display: "none" }}
+      />
       <label className={styles.field}>
         <span>Password</span>
         <input
