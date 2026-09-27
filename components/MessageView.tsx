@@ -755,6 +755,21 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
     const duration = toolCallDurations?.get(tc.toolCallId);
     return <ToolCallBlock block={tc} result={result} duration={duration} />;
   }
+  if (block.type === "image") {
+    const src = imageSource(block as ImageContent);
+    if (!src) return null;
+    return (
+      <div style={{ marginBottom: 6 }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          style={{ maxWidth: "100%", maxHeight: 480, height: "auto", borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+        />
+      </div>
+    );
+  }
   return null;
 }
 

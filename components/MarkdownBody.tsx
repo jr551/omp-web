@@ -3,7 +3,7 @@
 import { memo, useMemo, type MouseEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
-import { encodeFilePathForApi } from "@/lib/file-paths";
+import { resolveMarkdownImageSrc } from "@/lib/markdown-image";
 import { markdownRehypePlugins, markdownRemarkPlugins, normalizeDisplayMath, stripSystemWrapperTags } from "@/lib/markdown";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
 
@@ -73,15 +73,22 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
         </a>
       );
     },
-    img({ src, alt, ...props }) {
+    img({ src, alt, style, ...props }) {
       delete props.node;
-      const filePath = typeof src === "string" ? resolveLocalFileHref(src, cwd) : null;
-      const imageSrc = filePath
-        ? `/api/files/${encodeFilePathForApi(filePath)}?type=read`
-        : src;
-      // Dynamic local paths are served directly by the file API.
-      // eslint-disable-next-line @next/next/no-img-element
-      return <img src={imageSrc} alt={alt ?? ""} loading="lazy" {...props} />;
+      // Local file paths are served by /api/files (like local links); remote
+      // and data URLs pass through. Cap the size so a giant image cannot blow
+      // out the message column, and keep the aspect ratio.
+      const imageSrc = resolveMarkdownImageSrc(typeof src === "string" ? src : undefined, cwd);
+      return (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={imageSrc}
+          alt={alt ?? ""}
+          loading="lazy"
+          {...props}
+          style={{ maxWidth: "100%", maxHeight: 480, height: "auto", objectFit: "contain", ...style }}
+        />
+      );
     },
     table({ children }) {
       return (
