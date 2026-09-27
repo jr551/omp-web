@@ -437,6 +437,7 @@ function PiWebTitle() {
       }}
     >
       <OmpWordmark
+        suffix={showVersion ? undefined : "jrfork"}
         label={display}
         labelStyle={showVersion ? { fontFamily: "var(--font-mono)", letterSpacing: "-0.01em" } : undefined}
       />

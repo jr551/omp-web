@@ -2,6 +2,8 @@ import { useId, type CSSProperties, type ReactNode } from "react";
 
 type OmpWordmarkProps = {
   label?: ReactNode;
+  /** Muted suffix badge after the label, e.g. the fork name "jrfork". */
+  suffix?: ReactNode;
   markSize?: number;
   gap?: number;
   style?: CSSProperties;
@@ -10,6 +12,7 @@ type OmpWordmarkProps = {
 
 export function OmpWordmark({
   label = "omp",
+  suffix,
   markSize = 22,
   gap = 10,
   style,
@@ -59,6 +62,24 @@ export function OmpWordmark({
       >
         {label}
       </span>
+      {suffix != null && suffix !== "" && (
+        <span
+          style={{
+            flexShrink: 0,
+            fontFamily: '"Plus Jakarta Sans", Geist, ui-sans-serif, system-ui, sans-serif',
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.02em",
+            color: "var(--text-muted)",
+            border: "1px solid var(--border)",
+            borderRadius: 5,
+            padding: "1px 5px",
+            lineHeight: 1.4,
+          }}
+        >
+          {suffix}
+        </span>
+      )}
     </span>
   );
 }

@@ -715,7 +715,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
               }}
             >
               <div style={{ minWidth: 0, flex: 1, overflow: "hidden" }}>
-                <OmpWordmark />
+                <OmpWordmark suffix="jrfork" />
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
