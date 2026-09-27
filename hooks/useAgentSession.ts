@@ -21,6 +21,7 @@ import type { AdvisorStatusInfo, ContextUsage, GoalStatusInfo, SessionStatsInfo,
 import type { ModelRoleAssignment } from "@/lib/api-types";
 import { planSlashCommandIntent, planSlashCommandOutcome, type WebPlanModeInfo } from "@/lib/plan-mode-web";
 import { mergeQueued, reconcilePending, type OptimisticQueueEntry } from "@/lib/queue-optimistic";
+import { AUTO_FOLLOW_BOTTOM_THRESHOLD_PX, computeAutoFollow, distanceFromBottom } from "@/lib/chat-scroll";
 
 export interface SessionData {
   sessionId: string;
@@ -190,7 +191,10 @@ export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" 
 
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
 const USER_SCROLL_INTENT_MS = 1200;
-const AUTO_FOLLOW_BOTTOM_THRESHOLD_PX = 72;
+// How long, after first opening a session, to keep re-pinning the transcript to
+// the bottom. Markdown, syntax highlighting and images all land after the first
+// paint and grow the transcript, so a single initial scroll lands short.
+const INITIAL_SCROLL_SETTLE_MS = 700;
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
@@ -2196,14 +2200,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // otherwise following could never be paused mid-turn.
     const userDriven = Date.now() <= userScrollIntentUntilRef.current;
     if (!userDriven && Date.now() < ignoreProgrammaticScrollUntilRef.current) return;
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom <= AUTO_FOLLOW_BOTTOM_THRESHOLD_PX) {
-      setAutoFollow(true);
-      return;
-    }
-    if (userDriven) {
-      setAutoFollow(false);
-    }
+    const distance = distanceFromBottom(container.scrollHeight, container.scrollTop, container.clientHeight);
+    setAutoFollow(computeAutoFollow(completionScrollAllowedRef.current, {
+      distanceFromBottom: distance,
+      userDriven,
+      threshold: AUTO_FOLLOW_BOTTOM_THRESHOLD_PX,
+    }));
   }, [setAutoFollow]);
 
   // Load session on mount
@@ -2307,16 +2309,60 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => cancelAnimationFrame(frame);
   }, [agentRunning, bashRunning, messages.length, streamState.streamingMessage, agentPhase, pendingBash]);
 
+  // While the agent is active, keep the transcript pinned to the bottom as its
+  // content grows — not just per streamed chunk (handled above) but also for the
+  // deferred height changes markdown, syntax highlighting and images cause
+  // between/after chunks. Gated on a live agent and on auto-follow so it never
+  // fights a user who scrolled up (jump-to-bottom re-arms it) or the
+  // lazy-load-older-messages scroll restore, which only runs for idle sessions.
+  useEffect(() => {
+    if (!agentRunning && !bashRunning) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const target = container.firstElementChild ?? container;
+    const observer = new ResizeObserver(() => {
+      if (!completionScrollAllowedRef.current) return;
+      if (Date.now() <= userScrollIntentUntilRef.current) return;
+      ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+      container.scrollTo({ top: container.scrollHeight, behavior: "instant" });
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [agentRunning, bashRunning, loading]);
+
   useEffect(() => {
     if (messages.length === 0) return;
-    if (!initialScrollDoneRef.current) {
-      initialScrollDoneRef.current = true;
-      scrollToBottom("instant");
+    if (initialScrollDoneRef.current) {
+      if (completionScrollAllowedRef.current) {
+        scrollToBottom(agentRunningRef.current || bashRunningRef.current ? "instant" : "smooth");
+      }
       return;
     }
-    if (completionScrollAllowedRef.current) {
-      scrollToBottom(agentRunningRef.current || bashRunningRef.current ? "instant" : "smooth");
-    }
+    // First render of this session's transcript. A single scroll lands short
+    // because markdown/highlighting/images grow the list after paint, so
+    // re-pin to the bottom across a short settle window — bailing the moment the
+    // user grabs the scroll or the jump-to-bottom control pauses following.
+    initialScrollDoneRef.current = true;
+    let raf = 0;
+    let cancelled = false;
+    const startedAt = Date.now();
+    const pin = () => {
+      if (cancelled) return;
+      const container = scrollContainerRef.current;
+      const userInterfered = !completionScrollAllowedRef.current || Date.now() <= userScrollIntentUntilRef.current;
+      if (container && !userInterfered) {
+        ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+        container.scrollTo({ top: container.scrollHeight, behavior: "instant" });
+      }
+      if (!userInterfered && Date.now() - startedAt < INITIAL_SCROLL_SETTLE_MS) {
+        raf = requestAnimationFrame(pin);
+      }
+    };
+    raf = requestAnimationFrame(pin);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
   }, [messages.length, agentRunning, bashRunning, scrollToBottom]);
 
   // Load model list

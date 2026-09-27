@@ -223,8 +223,11 @@ test("lets a user scroll pause auto-follow mid-stream", () => {
   // impossible to clear while the model was producing output.
   assert.match(scrollHandlerSource, /const userDriven = Date\.now\(\) <= userScrollIntentUntilRef\.current/);
   assert.match(scrollHandlerSource, /if \(!userDriven && Date\.now\(\) < ignoreProgrammaticScrollUntilRef\.current\) return/);
-  assert.match(scrollHandlerSource, /distanceFromBottom <= AUTO_FOLLOW_BOTTOM_THRESHOLD_PX\)\s*\{\s*setAutoFollow\(true\)/);
-  assert.match(scrollHandlerSource, /if \(userDriven\) \{\s*setAutoFollow\(false\)/);
+  // The near-bottom-re-arms / user-scroll-pauses decision lives in the pure
+  // computeAutoFollow helper (unit-tested in lib/chat-scroll.test.mjs).
+  assert.match(scrollHandlerSource, /const distance = distanceFromBottom\(container\.scrollHeight, container\.scrollTop, container\.clientHeight\)/);
+  assert.match(scrollHandlerSource, /setAutoFollow\(computeAutoFollow\(completionScrollAllowedRef\.current, \{/);
+  assert.match(scrollHandlerSource, /userDriven,/);
 });
 
 test("exposes a paused-follow flag and a jump-to-bottom action", () => {
