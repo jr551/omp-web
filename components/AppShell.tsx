@@ -9,6 +9,7 @@ import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { SettingsConfig } from "./SettingsConfig";
+import { RoutinesConfig } from "./RoutinesConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { OmpUpdateIndicator } from "./OmpUpdateIndicator";
 import { BranchNavigator } from "./BranchNavigator";
@@ -118,6 +119,10 @@ export function AppShell() {
   const handleBackgroundTaskDone = useCallback(() => {
     if (soundEnabledRef.current) playDoneSound();
   }, [playDoneSound, soundEnabledRef]);
+  const handleOpenRoutines = useCallback((routineId?: string) => {
+    setRoutinesInitialId(routineId ?? null);
+    setRoutinesConfigOpen(true);
+  }, []);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
@@ -130,6 +135,8 @@ export function AppShell() {
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [settingsConfigOpen, setSettingsConfigOpen] = useState(false);
+  const [routinesConfigOpen, setRoutinesConfigOpen] = useState(false);
+  const [routinesInitialId, setRoutinesInitialId] = useState<string | null>(null);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
@@ -202,7 +209,7 @@ export function AppShell() {
   }, []);
   const { pinIfRevealed: pinEdgeRevealedPanel } = useEdgeReveal({
     active: edgeRevealEnabled && !isMobile,
-    suspended: settingsConfigOpen || projectTrustDialogOpen,
+    suspended: settingsConfigOpen || projectTrustDialogOpen || routinesConfigOpen,
     leftOpen: sidebarOpen,
     rightOpen: rightPanelOpen,
     leftPanelRef: sidebarResizer.panelRef,
@@ -910,9 +917,30 @@ export function AppShell() {
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
         onBackgroundTaskDone={handleBackgroundTaskDone}
+        onOpenRoutines={handleOpenRoutines}
       />
       <div style={{ padding: "0 8px", flexShrink: 0 }}>
         <OmpUpdateIndicator />
+      </div>
+      <div style={{ padding: "8px 8px 0", flexShrink: 0 }}>
+        <button
+          onClick={() => setRoutinesConfigOpen(true)}
+          title={translate("routines.manage")}
+          style={{
+            width: "100%", height: 34, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: "none", border: "1px solid var(--border)", borderRadius: 9,
+            color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
+            fontFamily: "var(--font-mono)", transition: "background 0.12s, color 0.12s, border-color 0.12s",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.borderColor = "var(--text-dim)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.borderColor = "var(--border)"; }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+          {translate("routines.sectionTitle")}
+        </button>
       </div>
       <div style={{ padding: "8px", flexShrink: 0 }}>
         <button
@@ -1928,6 +1956,13 @@ export function AppShell() {
         onClose={() => setSettingsConfigOpen(false)}
         onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
         onReloaded={() => setSessionKey((key) => key + 1)}
+      />
+    )}
+    {routinesConfigOpen && (
+      <RoutinesConfig
+        initialCwd={projectTrustCwd ?? null}
+        initialRoutineId={routinesInitialId}
+        onClose={() => { setRoutinesConfigOpen(false); setRoutinesInitialId(null); }}
       />
     )}
     {projectTrustDialogOpen && projectTrustCwd && (

@@ -424,6 +424,65 @@ providers (ollama, lm-studio, llama.cpp) behind a proxy. The launchers
 resolves `undici` to its own shim where `setGlobalDispatcher` does not affect
 `fetch` and `install` does not exist.
 
+### Routines (native scheduler)
+
+omp-web can run a prompt in a project unattended, on a schedule or a condition.
+
+- **Store** (`lib/routine-store.ts`): routines persist as JSON at
+  `<agentDir>/omp-web-routines.json` (`0600`, atomic replace via
+  `writePrivateFileAtomicSync`), with an in-memory copy cached on `globalThis`
+  like project-trust/rpc-manager. A `Routine` is
+  `{ id, name, cwd, trigger, prompt, provider?, modelId?, maxExecutionMs,
+  enabled, createdAt, updatedAt, lastRun?, history? }` (history capped at 20).
+  Client-safe types + bounds live in `lib/routine-types.ts` so the browser can
+  import them without pulling in `fs`/the SDK. `validateRoutineFields()` is pure
+  (no fs) and unit-tested; the API layer adds the existing-dir + allowed-roots
+  check. A legacy top-level `schedule` string is migrated to
+  `trigger: { type: "cron" }` on load.
+- **Trigger** is a tagged union:
+  `{ type: "cron", schedule }` (standard 5-field cron, `lib/cron.ts`) or
+  `{ type: "guard", intervalMs, command, guardTimeoutMs, expectOutputMatches? }`
+  — every `intervalMs`, run `command` via `bash -lc` (`lib/guard-command.ts`,
+  reusable/injectable) with its own timeout; the prompt runs only when it exits
+  0 (and matches the optional stdout regex), otherwise a `skipped` history entry
+  is recorded (consecutive identical skips collapse into one) and no agent runs.
+- **Cron** (`lib/cron.ts`): self-contained `parseCron` / `cronMatches` /
+  `describeCron`. `*`, lists, ranges, `*/n`, `a-b/n`, `?`≈`*`; day-of-week 0/7
+  are both Sunday; standard OR semantics when both DOM and DOW are restricted.
+- **Scheduler** (`lib/routine-scheduler.ts`): a `globalThis` singleton started
+  once from `instrumentation.ts` — note it runs under **Bun too**, so it lives
+  *before* the Bun guard in `register()` (unlike the Node-only http-dispatcher).
+  A ~30s `setInterval` tick fires due routines; cron firings dedupe on
+  `lastTriggeredMinute`, guards on `lastGuardCheck`. At most one run per routine
+  and a global cap of 3 concurrent. Each run gets a fresh session via
+  `startRpcSession` (default tool preset, routine model or project default),
+  sends the prompt, and enforces `maxExecutionMs` with an `AbortController`
+  (abort → `timeout`). The summary (≤280 chars) comes from the last assistant
+  text (else "No output"). The tick/dedupe/guard/summary logic is injectable
+  (fake clock + fake runner/guard) and unit-tested — **no real agents in tests**.
+- **Runner factoring** (`lib/routine-runner.ts`): `runPromptInSession()` /
+  `runPromptInFreshSession()` are the reusable "deliver a prompt into a run"
+  path, kept callable so future features (e.g. smartwake) can reuse them.
+- **API** (`app/api/routines/`): `route.ts` GET/POST, `[id]/route.ts`
+  GET/PUT/PATCH/DELETE, `[id]/run/route.ts` POST (run now, returns 202 without
+  blocking). All gated by `isApiRequestAllowed`; writes require JSON; the cwd is
+  authorized against allowed roots exactly like `/api/agent/new`, and
+  `allowFileRoot()` keeps a new cwd browsable.
+- **UI**: `components/RoutinesConfig.tsx` (a viewport-dialog modal opened from
+  the sidebar footer button and per-project Routines subsection) creates/edits
+  routines, with a Cron|Condition toggle, live `describeCron` preview, model
+  picker (`SearchableSelect` over `/api/models`), max-exec presets, and run
+  history. `components/SessionSidebar.tsx` renders a collapsible per-project
+  "Routines" subsection of clock-icon rows (name + last-run summary + run/pause
+  state, hover actions Run/Enable/Delete/Edit); collapse state persists under
+  `omp-web:collapsed-routine-sections`. Keep the sidebar memo rules — the new
+  `onOpenRoutines` prop is a stable `useCallback` and rows are plain
+  subcomponents with stable handlers.
+- **Scratch projects** (`lib/scratch-project.ts`): `~/omp-cwd-YYYYMMDD` and
+  temp-dir roots render as "Non Project Related" (i18n `sidebar.nonProjectRelated`),
+  pinned to the top of the sidebar with a muted `--warning` folder icon.
+- i18n keys live under `routines.*` in `lib/i18n/messages/{en,zh-CN}.ts`.
+
 ## omp Session File Format
 
 Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`

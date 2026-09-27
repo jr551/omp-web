@@ -6,6 +6,9 @@ import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { useI18n } from "@/hooks/useI18n";
+import { isScratchProjectRoot } from "@/lib/scratch-project";
+import { describeCron } from "@/lib/cron";
+import type { RoutineWithStatus, RoutineTrigger } from "@/lib/routine-types";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { OmpWordmark } from "./OmpWordmark";
@@ -97,6 +100,8 @@ interface Props {
   /** Fired when a session that is not currently selected finishes running.
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
+  /** Open the Routines manager, optionally pre-selecting a routine to edit. */
+  onOpenRoutines?: (routineId?: string) => void;
 }
 
 interface WorktreeEntry {
@@ -121,6 +126,140 @@ const RUNNING_SESSIONS_POLL_MS = 2500;
 const PROJECT_SESSION_LIMIT = 5;
 const COLLAPSED_PROJECTS_STORAGE_KEY = "omp-web:collapsed-projects";
 const REMOVED_PROJECTS_STORAGE_KEY = "omp-web:removed-projects";
+const COLLAPSED_ROUTINES_STORAGE_KEY = "omp-web:collapsed-routine-sections";
+
+function loadStringSet(key: string): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((path): path is string => typeof path === "string"))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveStringSet(key: string, values: Set<string>): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (values.size === 0) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify([...values]));
+  } catch {
+    // Ignore storage quota and privacy-mode errors.
+  }
+}
+
+function routineTriggerSummary(trigger: RoutineTrigger, t: (key: string, params?: Record<string, string | number>) => string): string {
+  if (trigger.type === "cron") return describeCron(trigger.schedule);
+  return t("routines.conditionSummary", { minutes: Math.round(trigger.intervalMs / 60_000) });
+}
+
+interface RoutineSidebarRowProps {
+  routine: RoutineWithStatus;
+  onRunNow: (id: string) => void;
+  onToggleEnabled: (routine: RoutineWithStatus) => void;
+  onDelete: (routine: RoutineWithStatus) => void;
+  onEdit: (id: string) => void;
+  t: (key: string, params?: Record<string, string | number>) => string;
+}
+
+function RoutineSidebarRow({ routine, onRunNow, onToggleEnabled, onDelete, onEdit, t }: RoutineSidebarRowProps) {
+  const [hovered, setHovered] = useState(false);
+  const summary = routine.lastRun?.summary
+    || routineTriggerSummary(routine.trigger, t)
+    || t("routines.neverRun");
+  const statusColor = !routine.enabled
+    ? "var(--text-dim)"
+    : routine.lastRun?.status === "error"
+      ? "var(--danger)"
+      : routine.lastRun?.status === "timeout"
+        ? "var(--warning)"
+        : "var(--success)";
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{ display: "flex", alignItems: "center", gap: 7, padding: "4px 6px", borderRadius: 6, background: hovered ? "var(--bg-hover)" : "transparent" }}
+    >
+      <button
+        type="button"
+        onClick={() => onEdit(routine.id)}
+        title={summary}
+        style={{ display: "flex", alignItems: "center", gap: 7, flex: 1, minWidth: 0, padding: 0, border: "none", background: "transparent", cursor: "pointer", textAlign: "left" }}
+      >
+        <span style={{ flexShrink: 0, display: "flex", width: 14, height: 14, color: routine.enabled ? "var(--accent)" : "var(--text-dim)" }}>
+          {routine.running ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }}>
+              <path d="M12 3a9 9 0 1 0 9 9" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ opacity: routine.enabled ? 1 : 0.6 }}>
+              <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+            </svg>
+          )}
+        </span>
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <span style={{ display: "block", overflow: "hidden", color: routine.enabled ? "var(--text)" : "var(--text-muted)", font: "550 11.5px/1.3 var(--font-mono)", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{routine.name}</span>
+          <span style={{ display: "block", overflow: "hidden", color: "var(--text-dim)", font: "10px/1.35 var(--font-mono)", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</span>
+        </span>
+      </button>
+      {hovered ? (
+        <span style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+          <RoutineRowButton title={t("routines.runNow")} onClick={() => onRunNow(routine.id)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5v14l11-7z" /></svg>
+          </RoutineRowButton>
+          <RoutineRowButton title={routine.enabled ? t("routines.disable") : t("routines.enable")} onClick={() => onToggleEnabled(routine)}>
+            {routine.enabled
+              ? <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+              : <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5v14l11-7z" /></svg>}
+          </RoutineRowButton>
+          <RoutineRowButton title={t("routines.delete")} onClick={() => onDelete(routine)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13" /></svg>
+          </RoutineRowButton>
+        </span>
+      ) : (
+        <span style={{ flexShrink: 0, width: 7, height: 7, borderRadius: "50%", background: statusColor }} />
+      )}
+    </div>
+  );
+}
+
+function RoutineRowButton({ title, onClick, children }: { title: string; onClick: () => void; children: ReactNode }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "none", borderRadius: 5, background: hovered ? "var(--bg-selected)" : "transparent", color: hovered ? "var(--text)" : "var(--text-dim)", cursor: "pointer" }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Attach each routine to the deepest known project root that contains its cwd. */
+function groupRoutinesByProject(routines: RoutineWithStatus[], projects: string[]): Map<string, RoutineWithStatus[]> {
+  const grouped = new Map<string, RoutineWithStatus[]>();
+  const normalizedProjects = projects
+    .map((project) => ({ project, key: normalizeProjectKey(project) }))
+    .sort((a, b) => b.key.length - a.key.length);
+  for (const routine of routines) {
+    const cwdKey = normalizeProjectKey(routine.cwd);
+    const match = normalizedProjects.find(({ key }) => cwdKey === key || cwdKey.startsWith(`${key}/`));
+    const bucket = match?.project ?? routine.cwd;
+    const existing = grouped.get(bucket);
+    if (existing) existing.push(routine);
+    else grouped.set(bucket, [routine]);
+  }
+  return grouped;
+}
 
 function normalizeProjectKey(project: string): string {
   const normalized = project.replace(/\\/g, "/");
@@ -447,7 +586,7 @@ function PiWebTitle() {
 
 // memo: AppShell re-renders on file-tab switches and top-bar state; every prop
 // here is a stable callback or a value the sidebar renders, so skip those.
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenRoutines }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionsForDisplay = useMemo(
@@ -463,6 +602,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [projectFilter, setProjectFilter] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
+  const [collapsedRoutineSections, setCollapsedRoutineSections] = useState<Set<string>>(() => new Set());
+  const [routines, setRoutines] = useState<RoutineWithStatus[]>([]);
   const [hoveredProject, setHoveredProject] = useState<string | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState<string | null>(null);
   const [removedProjects, setRemovedProjects] = useState<Set<string>>(() => new Set());
@@ -499,7 +640,66 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     setCollapsedProjects(loadCollapsedProjects());
     setRemovedProjects(loadRemovedProjects());
+    setCollapsedRoutineSections(loadStringSet(COLLAPSED_ROUTINES_STORAGE_KEY));
   }, []);
+
+  const loadRoutines = useCallback(async () => {
+    try {
+      const response = await fetch("/api/routines", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json() as { routines?: RoutineWithStatus[] };
+      setRoutines(data.routines ?? []);
+    } catch {
+      // A routines fetch failure must never break the session sidebar.
+    }
+  }, []);
+
+  useEffect(() => { void loadRoutines(); }, [loadRoutines, refreshKey]);
+
+  // Keep routine rows fresh: poll while any routine is running, else on a slow beat.
+  useEffect(() => {
+    const anyRunning = routines.some((routine) => routine.running);
+    const interval = setInterval(() => void loadRoutines(), anyRunning ? 3000 : 20000);
+    return () => clearInterval(interval);
+  }, [routines, loadRoutines]);
+
+  const toggleRoutineSection = useCallback((project: string) => {
+    setCollapsedRoutineSections((current) => {
+      const next = new Set(current);
+      if (next.has(project)) next.delete(project);
+      else next.add(project);
+      saveStringSet(COLLAPSED_ROUTINES_STORAGE_KEY, next);
+      return next;
+    });
+  }, []);
+
+  const handleRoutineRunNow = useCallback(async (id: string) => {
+    try {
+      await fetch(`/api/routines/${id}/run`, { method: "POST" });
+      await loadRoutines();
+    } catch { /* ignore */ }
+  }, [loadRoutines]);
+
+  const handleRoutineToggleEnabled = useCallback(async (routine: RoutineWithStatus) => {
+    try {
+      await fetch(`/api/routines/${routine.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !routine.enabled }),
+      });
+      await loadRoutines();
+    } catch { /* ignore */ }
+  }, [loadRoutines]);
+
+  const handleRoutineDelete = useCallback(async (routine: RoutineWithStatus) => {
+    if (typeof window !== "undefined" && !window.confirm(t("routines.confirmDelete"))) return;
+    try {
+      await fetch(`/api/routines/${routine.id}`, { method: "DELETE" });
+      await loadRoutines();
+    } catch { /* ignore */ }
+  }, [loadRoutines, t]);
+
+  const handleRoutineEdit = useCallback((id: string) => { onOpenRoutines?.(id); }, [onOpenRoutines]);
 
 
   const loadSessions = useCallback(async (showLoading = false, force = false) => {
@@ -963,12 +1163,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     return counts;
   }, [sessionsForDisplay, runningSessionIds, unreadSessionIds]);
 
+  const routinesByProject = groupRoutinesByProject(routines, projectPaths);
+
   const normalizedProjectFilter = projectFilter.trim().toLowerCase();
   const projectGroups = projectPaths.flatMap((project) => {
     const segments = project.replace(/[\\/]+$/, "").split(/[\\/]/);
-    const name = segments.at(-1) || project;
+    const isScratch = isScratchProjectRoot(project, homeDir || undefined);
+    // Scratch/default dirs read as one bucket rather than a throwaway basename.
+    const name = isScratch ? t("sidebar.nonProjectRelated") : (segments.at(-1) || project);
     const sessions = sessionsByProject.get(project) ?? [];
-    if (!normalizedProjectFilter) return [{ project, name, sessions }];
+    if (!normalizedProjectFilter) return [{ project, name, sessions, isScratch }];
 
     const projectMatches = name.toLowerCase().includes(normalizedProjectFilter);
     const matchingSessions = sessions.filter((session) => {
@@ -976,8 +1180,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       return title.toLowerCase().includes(normalizedProjectFilter);
     });
     if (!projectMatches && matchingSessions.length === 0) return [];
-    return [{ project, name, sessions: projectMatches ? sessions : matchingSessions }];
-  });
+    return [{ project, name, sessions: projectMatches ? sessions : matchingSessions, isScratch }];
+  })
+    // Pin "Non Project Related" groups to the very top; sort is stable so the
+    // recency order within each partition is preserved.
+    .sort((a, b) => Number(b.isScratch) - Number(a.isScratch));
 
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
@@ -1206,8 +1413,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             {normalizedProjectFilter ? t("sidebar.noMatchingProjects") : t("sidebar.noSessions")}
           </div>
         )}
-        {!loading && !error && projectGroups.map(({ project, name, sessions }) => {
+        {!loading && !error && projectGroups.map(({ project, name, sessions, isScratch }) => {
           const isSelectedProject = project === selectedProject;
+          const projectRoutines = routinesByProject.get(project) ?? [];
+          const routinesCollapsed = collapsedRoutineSections.has(project);
           const isCollapsed = collapsedProjects.has(project) && !normalizedProjectFilter;
           const isExpanded = expandedProjects.has(project);
           const visibleSessionsForProject = isExpanded ? sessions : sessions.slice(0, PROJECT_SESSION_LIMIT);
@@ -1286,7 +1495,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                     fontWeight: isSelectedProject ? 600 : 500,
                   }}
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, color: isSelectedProject ? "var(--accent)" : "var(--text-dim)" }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, opacity: isScratch ? 0.7 : 1, color: isScratch ? "var(--warning)" : (isSelectedProject ? "var(--accent)" : "var(--text-dim)") }}>
                     <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z" />
                   </svg>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
@@ -1765,6 +1974,52 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 >
                   {isExpanded ? t("sidebar.showLess") : t("sidebar.showMore")}
                 </button>
+              )}
+              {!isCollapsed && projectRoutines.length > 0 && (
+                <div style={{ paddingLeft: 12, marginTop: 3 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "1px 4px" }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleRoutineSection(project)}
+                      title={routinesCollapsed ? t("routines.showSection") : t("routines.hideSection")}
+                      aria-expanded={!routinesCollapsed}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0, height: 24,
+                        padding: "0 4px", border: "none", background: "transparent",
+                        color: "var(--text-dim)", cursor: "pointer", textAlign: "left",
+                        font: "600 10px/1 var(--font-mono)", letterSpacing: "0.06em", textTransform: "uppercase",
+                      }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: routinesCollapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.12s", flexShrink: 0 }}>
+                        <polyline points="2.5 4 6 7.5 9.5 4" />
+                      </svg>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+                        <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+                      </svg>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("routines.sectionTitle")} · {projectRoutines.length}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenRoutines?.()}
+                      title={t("routines.add")}
+                      aria-label={t("routines.add")}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, border: "none", background: "transparent", color: "var(--text-dim)", cursor: "pointer", flexShrink: 0 }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><line x1="6" y1="1.5" x2="6" y2="10.5" /><line x1="1.5" y1="6" x2="10.5" y2="6" /></svg>
+                    </button>
+                  </div>
+                  {!routinesCollapsed && projectRoutines.map((routine) => (
+                    <RoutineSidebarRow
+                      key={routine.id}
+                      routine={routine}
+                      onRunNow={handleRoutineRunNow}
+                      onToggleEnabled={handleRoutineToggleEnabled}
+                      onDelete={handleRoutineDelete}
+                      onEdit={handleRoutineEdit}
+                      t={t}
+                    />
+                  ))}
+                </div>
               )}
             </section>
           );
