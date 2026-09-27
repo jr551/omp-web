@@ -15,6 +15,57 @@ const markdownSanitizeSchema = {
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
+// Internal wrapper tags that omp and its agents sometimes emit around system
+// notices (system reminders, warnings). rehype's raw-HTML handling treats them
+// inconsistently: a hyphenated name like <system-reminder> parses as a custom
+// element and is dropped, but an underscore name like <system_warning> is not a
+// valid HTML tag name, so it is escaped and shown to the user *verbatim*. Either
+// way these are not meant for the transcript. Strip both the opening and closing
+// forms (keeping any inner text) before rendering. `_` and `-` are treated the
+// same, and only these known system tags are touched — arbitrary `<...>` and
+// generics like Array<string> are left alone.
+const SYSTEM_WRAPPER_TAG_GLOBAL = /<\/?\s*system[-_](?:warning|reminder)(?:\s[^>]*)?\s*>/gi;
+
+function stripSystemTagsOutsideInlineCode(line: string): string {
+  // Preserve inline code spans (`...`) so a documented example of the tag survives.
+  return line
+    .split(/(`+[^`]*`+)/)
+    .map((part, index) => (index % 2 === 1 ? part : part.replace(SYSTEM_WRAPPER_TAG_GLOBAL, "")))
+    .join("");
+}
+
+export function stripSystemWrapperTags(markdown: string): string {
+  // Cheap guard with a fresh (non-global) regex so there is no shared lastIndex.
+  if (!/<\/?\s*system[-_](?:warning|reminder)/i.test(markdown)) return markdown;
+  const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
+  let fence: { marker: string; size: number } | null = null;
+  let rawCodeTag: string | null = null;
+  const out = markdown.split(/\r?\n/).map((line) => {
+    if (rawCodeTag) {
+      if (new RegExp(`</${rawCodeTag}\\s*>`, "i").test(line)) rawCodeTag = null;
+      return line;
+    }
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      const size = fenceMatch[1].length;
+      if (!fence) fence = { marker, size };
+      else if (marker === fence.marker && size >= fence.size) fence = null;
+      return line;
+    }
+    if (fence) return line;
+    const rawCodeOpen = line.match(/<(code|pre|script|style)\b/i);
+    if (rawCodeOpen) {
+      const tag = rawCodeOpen[1].toLowerCase();
+      const remainder = line.slice((rawCodeOpen.index ?? 0) + rawCodeOpen[0].length);
+      if (!new RegExp(`</${tag}\\s*>`, "i").test(remainder)) rawCodeTag = tag;
+      return line;
+    }
+    return stripSystemTagsOutsideInlineCode(line);
+  });
+  return out.join(lineBreak);
+}
+
 export function normalizeDisplayMath(markdown: string): string {
   const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
   const lines = markdown.split(/\r?\n/);

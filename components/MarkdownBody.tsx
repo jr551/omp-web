@@ -4,7 +4,7 @@ import { memo, useMemo, type MouseEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { markdownRehypePlugins, markdownRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { markdownRehypePlugins, markdownRemarkPlugins, normalizeDisplayMath, stripSystemWrapperTags } from "@/lib/markdown";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
 
 interface MarkdownBodyProps {
@@ -20,7 +20,7 @@ interface MarkdownBodyProps {
 // copy feedback, tool results arriving). All props are strings/booleans or a
 // stable callback, so a shallow compare is enough to skip the re-parse.
 export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
-  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(stripSystemWrapperTags(children)), [children]);
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
   const components = useMemo<Components>(() => ({
     code({ className, children, ...props }) {
