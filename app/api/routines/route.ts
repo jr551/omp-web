@@ -5,6 +5,7 @@ import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security"
 import {
   createRoutine,
   listRoutines,
+  listRoutineSessionIds,
   validateRoutineFields,
 } from "@/lib/routine-store";
 import { toRoutineWithStatus } from "@/lib/routine-scheduler";
@@ -19,7 +20,12 @@ export async function GET(req: Request) {
   }
   try {
     const baseUrl = resolveExternalBaseUrl(req);
-    return NextResponse.json({ routines: listRoutines().map((routine) => toRoutineWithStatus(routine, baseUrl)) });
+    return NextResponse.json({
+      routines: listRoutines().map((routine) => toRoutineWithStatus(routine, baseUrl)),
+      // Session ids created by routine runs — the sidebar hides these from the
+      // normal session list (still reachable via the routine activity view).
+      routineSessionIds: listRoutineSessionIds(),
+    });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

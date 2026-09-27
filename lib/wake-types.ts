@@ -234,16 +234,24 @@ export function humanizeDuration(ms: number): string {
 // --- Safe listing (no message / pollCommand leaked to the browser) ------
 
 /**
- * A pending wake trimmed to fields that are safe to expose to the browser: the
- * stored `message` and `pollCommand` may contain sensitive content, so they are
- * omitted. Used by GET /api/wakes to drive the pending 😎 indicators.
+ * A pending wake trimmed to fields that are safe to expose to the browser and
+ * enough to *describe* the wake (mode, timing, and — for a guarded wake — the
+ * poll command). The stored `message` is always stripped: it is not needed to
+ * describe a wake and may be long/arbitrary. `GET /api/wakes` is authenticated
+ * (behind the form login + same-origin checks), so exposing the operator's own
+ * wake command + timing for display is intentional. Used to drive the pending
+ * 😎 indicators and the descriptive chat-header badge.
  */
 export interface SafeWake {
   id: string;
   sessionId: string;
   cwd: string;
   mode: WakeMode;
+  /** guarded mode: the bash command being polled. */
+  pollCommand?: string;
+  /** delayed mode: epoch ms at/after which the wake fires. */
   fireAt?: number;
+  /** guarded mode: poll interval. */
   intervalMs?: number;
   createdAt: number;
   expiresAt: number;
@@ -254,6 +262,8 @@ export interface PendingWakesByKey {
   count: number;
   /** Earliest upcoming fire time among the wakes for this key (delayed mode). */
   nextFireAt: number | null;
+  /** The safe wakes themselves, so a caller can describe them (chat header). */
+  wakes: SafeWake[];
 }
 
 export interface PendingWakesSummary {
@@ -262,13 +272,14 @@ export interface PendingWakesSummary {
   byCwd: Record<string, PendingWakesByKey>;
 }
 
-/** Project a wake down to its browser-safe fields. */
+/** Project a wake down to its browser-safe (but describable) fields. */
 export function toSafeWake(wake: Wake): SafeWake {
   return {
     id: wake.id,
     sessionId: wake.sessionId,
     cwd: wake.cwd,
     mode: wake.mode,
+    ...(typeof wake.pollCommand === "string" ? { pollCommand: wake.pollCommand } : {}),
     ...(typeof wake.fireAt === "number" ? { fireAt: wake.fireAt } : {}),
     ...(typeof wake.intervalMs === "number" ? { intervalMs: wake.intervalMs } : {}),
     createdAt: wake.createdAt,
@@ -287,24 +298,74 @@ export function summarizePendingWakes(wakes: readonly Wake[]): PendingWakesSumma
   const bySession: Record<string, PendingWakesByKey> = {};
   const byCwd: Record<string, PendingWakesByKey> = {};
 
-  const bump = (bucket: Record<string, PendingWakesByKey>, key: string, fireAt?: number) => {
+  const bump = (bucket: Record<string, PendingWakesByKey>, key: string, wake: SafeWake) => {
     if (!key) return;
-    const entry = bucket[key] ?? { count: 0, nextFireAt: null };
+    const entry = bucket[key] ?? { count: 0, nextFireAt: null, wakes: [] };
     entry.count += 1;
-    if (typeof fireAt === "number") {
-      entry.nextFireAt = entry.nextFireAt === null ? fireAt : Math.min(entry.nextFireAt, fireAt);
+    entry.wakes.push(wake);
+    if (typeof wake.fireAt === "number") {
+      entry.nextFireAt = entry.nextFireAt === null ? wake.fireAt : Math.min(entry.nextFireAt, wake.fireAt);
     }
     bucket[key] = entry;
   };
 
   for (const wake of wakes) {
     if (wake.status !== "pending") continue;
-    safe.push(toSafeWake(wake));
-    bump(bySession, wake.sessionId, wake.fireAt);
-    bump(byCwd, wake.cwd, wake.fireAt);
+    const safeWake = toSafeWake(wake);
+    safe.push(safeWake);
+    bump(bySession, wake.sessionId, safeWake);
+    bump(byCwd, wake.cwd, safeWake);
   }
 
   return { wakes: safe, bySession, byCwd };
+}
+
+// --- Pending-wake badge description (pure) ------------------------------
+
+/** Longest poll command rendered inline in a badge before it is truncated. */
+export const WAKE_COMMAND_DISPLAY_LENGTH = 40;
+
+/** Truncate a command for inline display, keeping a trailing ellipsis. */
+export function truncateCommand(command: string, max: number = WAKE_COMMAND_DISPLAY_LENGTH): string {
+  const trimmed = command.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/** A descriptive badge for a session's pending wake(s): short label + tooltip. */
+export interface PendingWakeBadge {
+  /** Short text next to the 😎 (no emoji), e.g. "Waking in 2h". */
+  label: string;
+  /** Full description for the title/tooltip (one line per wake). */
+  title: string;
+}
+
+/**
+ * Describe the pending wakes for one session as a badge. Pure and clock-injected
+ * (tests pass `now`), reusing {@link summarizeWake} / {@link humanizeDuration}:
+ * - one delayed wake → "Waking in 2h"
+ * - one guarded wake → "Watching: `<pollCommand>`" (command truncated)
+ * - several wakes    → "N watches"
+ * The tooltip carries the full detail (absolute expiry, full command, interval).
+ * Returns null when there is nothing pending.
+ */
+export function describePendingWakes(wakes: readonly SafeWake[], now: number): PendingWakeBadge | null {
+  const pending = wakes.filter((wake) => wake.status === "pending");
+  if (pending.length === 0) return null;
+
+  const title = pending.map((wake) => summarizeWake(wake, now)).join("\n");
+  if (pending.length > 1) {
+    return { label: `${pending.length} watches`, title };
+  }
+
+  const [wake] = pending;
+  if (wake.mode === "delayed" && typeof wake.fireAt === "number") {
+    return { label: `Waking in ${humanizeDuration(wake.fireAt - now)}`, title };
+  }
+  if (wake.mode === "guarded" && wake.pollCommand) {
+    return { label: `Watching: ${truncateCommand(wake.pollCommand)}`, title };
+  }
+  return { label: "Wake pending", title };
 }
 
 /** A one-line human summary of a scheduled wake (returned by the tool). */

@@ -498,13 +498,35 @@ omp-web can run a prompt in a project unattended, on a schedule or a condition.
   into a SINGLE "Non Project Related" group (sessions + routines combined) so
   multiple scratch dirs never render as duplicate groups.
 - **Pending 😎 badge**: `GET /api/wakes` returns pending `smartwake` wakes
-  grouped by `sessionId`/`cwd` (browser-safe fields only — never the stored
-  message/pollCommand; `summarizePendingWakes` in `lib/wake-types.ts`, unit
-  tested). The sidebar and AppShell poll it on the running-poll cadence (~2.5s,
-  paused when hidden) and show a 😎 badge on any session row / chat header whose
-  session has a pending wake, and on routine rows that are running, have an
-  imminent cron firing, or one of whose run sessions has a pending wake
-  (`isRoutinePending`).
+  grouped by `sessionId`/`cwd` (`summarizePendingWakes` in `lib/wake-types.ts`,
+  unit tested). Each grouping now carries the wakes' descriptive fields — `mode`,
+  `pollCommand` (guarded), `intervalMs`, `fireAt`, `expiresAt` — because the
+  endpoint is authenticated (behind the form login + same-origin checks), so
+  exposing the operator's OWN wake command + timing for display is intentional.
+  The stored `message` is STILL stripped (not needed, may be long/arbitrary).
+  The sidebar polls it on the running-poll cadence (~2.5s, paused when hidden)
+  and shows a bare 😎 dot on any session row whose session has a pending wake,
+  and on routine rows that are running, have an imminent cron firing, or one of
+  whose run sessions has a pending wake (`isRoutinePending`). AppShell keeps the
+  per-session detail and renders a DESCRIPTIVE chat-header badge via
+  `describePendingWakes` (unit tested): "😎 Waking in 2h" (delayed), "😎
+  Watching: `<cmd>`" (guarded, truncated), or "😎 N watches" (multiple), with the
+  full timing/command in the title. Compute `now` from a value captured at poll
+  time — never call `Date.now()` inline during render (react-hooks/purity).
+- **Routine-run sessions are hidden from the session list.** Every routine run
+  creates a fresh session (`runPromptInFreshSession`); those clutter the sidebar.
+  `lib/routine-store.ts` keeps a PERSISTENT, UNCAPPED set of routine-run session
+  ids (added in `recordRun` whenever a run stores a `sessionId`, backfilled from
+  run histories on load) — persisted as `routineSessionIds` in
+  `omp-web-routines.json` and exposed via `GET /api/routines`. `SessionSidebar`
+  filters those ids out of the normal session list (both project groups and "Non
+  Project Related", and even a session re-injected via optimisticSession) using
+  the pure `hideRoutineSessions` helper (`lib/routine-session-filter.ts`, unit
+  tested). Only routine-RUN fresh sessions are hidden — a smartwake re-enters the
+  worker's OWN existing session, which is a normal user session and stays
+  visible. Hidden ≠ unavailable: the routine activity view's "Open transcript"
+  (`handleOpenSessionById`) fetches `/api/sessions` by id directly, so the
+  transcript still opens.
 - **Routines git sync** (`lib/routine-git.ts`): export the routine store to
   `omp-web-routines.json` in a target git repo and commit/push, or pull and
   merge it back. `mergeRoutines`/`serializeRoutines`/`parseRoutines` and the

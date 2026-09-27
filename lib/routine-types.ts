@@ -69,4 +69,6 @@ export interface RoutineWithStatus extends Routine {
 
 export interface RoutinesListResponse {
   routines: RoutineWithStatus[];
+  /** Session ids created by routine runs, hidden from the normal session list. */
+  routineSessionIds?: string[];
 }

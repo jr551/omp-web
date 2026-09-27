@@ -9,6 +9,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { collapseScratchGroups, isScratchProjectRoot } from "@/lib/scratch-project";
 import { describeCron, parseCron, cronMatches } from "@/lib/cron";
 import type { RoutineWithStatus, RoutineTrigger } from "@/lib/routine-types";
+import { hideRoutineSessions } from "@/lib/routine-session-filter";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { OmpWordmark } from "./OmpWordmark";
@@ -642,11 +643,20 @@ function PiWebTitle() {
 export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onOpenRoutines, onOpenRoutineActivity, selectedRoutineId }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  // Session ids created by routine RUNS (from /api/routines). Hidden from the
+  // normal session list; still reachable via the routine activity view.
+  const [routineSessionIds, setRoutineSessionIds] = useState<Set<string>>(() => new Set());
   const sessionsForDisplay = useMemo(
-    () => optimisticSession && !allSessions.some((session) => session.id === optimisticSession.id)
-      ? [optimisticSession, ...allSessions]
-      : allSessions,
-    [allSessions, optimisticSession],
+    () => {
+      const combined = optimisticSession && !allSessions.some((session) => session.id === optimisticSession.id)
+        ? [optimisticSession, ...allSessions]
+        : allSessions;
+      // Filter in BOTH the project groups and "Non Project Related" (this is the
+      // single source both are derived from), and even when a routine session is
+      // re-injected via optimisticSession.
+      return hideRoutineSessions(combined, routineSessionIds);
+    },
+    [allSessions, optimisticSession, routineSessionIds],
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -701,8 +711,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     try {
       const response = await fetch("/api/routines", { cache: "no-store" });
       if (!response.ok) return;
-      const data = await response.json() as { routines?: RoutineWithStatus[] };
+      const data = await response.json() as { routines?: RoutineWithStatus[]; routineSessionIds?: string[] };
       setRoutines(data.routines ?? []);
+      setRoutineSessionIds(new Set(data.routineSessionIds ?? []));
     } catch {
       // A routines fetch failure must never break the session sidebar.
     }

@@ -51,6 +51,7 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode, SubagentSnapshot } from "@/lib/types";
+import { describePendingWakes, type PendingWakesByKey } from "@/lib/wake-types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/omp-types";
@@ -127,9 +128,13 @@ export function AppShell() {
   // The routine whose activity view (one chat per routine) is open in the main
   // area, if any. Mutually exclusive with an open chat session.
   const [activeRoutineId, setActiveRoutineId] = useState<string | null>(null);
-  // Session ids with a pending smartwake, polled from /api/wakes to badge the
-  // open session's chat header with 😎.
-  const [pendingWakeSessions, setPendingWakeSessions] = useState<Set<string>>(() => new Set());
+  // Pending smartwakes grouped by session id, polled from /api/wakes, so the
+  // open session's chat header can render a descriptive 😎 badge (what it is
+  // watching / when it wakes), not just presence.
+  const [pendingWakeBySession, setPendingWakeBySession] = useState<Record<string, PendingWakesByKey>>({});
+  // Wall-clock captured at each /api/wakes poll, so the descriptive badge can be
+  // computed from a stable value during render (never Date.now() inline).
+  const [pendingWakeNow, setPendingWakeNow] = useState(() => Date.now());
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
@@ -946,8 +951,11 @@ export function AppShell() {
       try {
         const res = await fetch("/api/wakes", { cache: "no-store" });
         if (res.ok) {
-          const data = await res.json() as { bySession?: Record<string, unknown> };
-          if (!stopped) setPendingWakeSessions(new Set(Object.keys(data.bySession ?? {})));
+          const data = await res.json() as { bySession?: Record<string, PendingWakesByKey> };
+          if (!stopped) {
+            setPendingWakeBySession(data.bySession ?? {});
+            setPendingWakeNow(Date.now());
+          }
         }
       } catch {
         // Keep the last known set; the next visible-tab poll retries.
@@ -968,7 +976,9 @@ export function AppShell() {
     };
   }, []);
 
-  const selectedSessionPendingWake = selectedSession ? pendingWakeSessions.has(selectedSession.id) : false;
+  const selectedSessionWakeBadge = selectedSession
+    ? describePendingWakes(pendingWakeBySession[selectedSession.id]?.wakes ?? [], pendingWakeNow)
+    : null;
 
   const sidebarContent = (
     <>
@@ -1313,13 +1323,14 @@ export function AppShell() {
               {!isMobile && <span>{translate("trust.resourcesNotLoaded")}</span>}
             </button>
           )}
-          {showChat && selectedSessionPendingWake && (
+          {showChat && selectedSessionWakeBadge && (
             <div
-              title={translate("wakes.pending")}
-              aria-label={translate("wakes.pending")}
-              style={{ display: "flex", alignItems: "center", padding: "0 10px", borderRight: "1px solid var(--border)", fontSize: 15, lineHeight: 1, flexShrink: 0 }}
+              title={selectedSessionWakeBadge.title}
+              aria-label={`${translate("wakes.pending")}: ${selectedSessionWakeBadge.label}`}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 10px", borderRight: "1px solid var(--border)", fontSize: 13, lineHeight: 1, flexShrink: 0, whiteSpace: "nowrap", color: "var(--text-muted)" }}
             >
-              😎
+              <span style={{ fontSize: 15 }}>😎</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }}>{selectedSessionWakeBadge.label}</span>
             </div>
           )}
           {showChat && (

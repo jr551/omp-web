@@ -79,6 +79,14 @@ export interface ValidatedRoutineFields {
 
 declare global {
   var __ompRoutines: Map<string, Routine> | undefined;
+  /**
+   * Persistent set of session ids created by routine RUNS. Every routine run
+   * gets a fresh session (lib/routine-runner.ts) that clutters the normal
+   * session list; the sidebar filters these out. Unlike the 20-entry run
+   * `history`, this set is NOT capped, so a session stays hidden even after its
+   * run scrolls out of history.
+   */
+  var __ompRoutineSessionIds: Set<string> | undefined;
   var __ompRoutinesLoadedFrom: string | undefined;
 }
 
@@ -264,8 +272,17 @@ function migrateRoutine(raw: unknown): Routine | null {
   };
 }
 
-function readRoutinesFromDisk(agentDir: string): Map<string, Routine> {
-  const map = new Map<string, Routine>();
+/** Collect the run session ids recorded on a routine's lastRun + history. */
+function sessionIdsFromRoutine(routine: Routine, into: Set<string>): void {
+  if (routine.lastRun?.sessionId) into.add(routine.lastRun.sessionId);
+  for (const run of routine.history ?? []) {
+    if (run.sessionId) into.add(run.sessionId);
+  }
+}
+
+function readStoreFromDisk(agentDir: string): { routines: Map<string, Routine>; sessionIds: Set<string> } {
+  const routines = new Map<string, Routine>();
+  const sessionIds = new Set<string>();
   try {
     const parsed: unknown = JSON.parse(readFileSync(routinesFilePath(agentDir), "utf8"));
     const list = Array.isArray(parsed)
@@ -275,26 +292,49 @@ function readRoutinesFromDisk(agentDir: string): Map<string, Routine> {
         : [];
     for (const entry of list) {
       const routine = migrateRoutine(entry);
-      if (routine) map.set(routine.id, routine);
+      if (routine) routines.set(routine.id, routine);
     }
+    // The persisted, uncapped set is authoritative.
+    if (isRecord(parsed) && Array.isArray(parsed.routineSessionIds)) {
+      for (const id of parsed.routineSessionIds) {
+        if (typeof id === "string" && id) sessionIds.add(id);
+      }
+    }
+    // Backfill from run histories so existing stores (written before this set
+    // existed) still hide the runs they can still see.
+    for (const routine of routines.values()) sessionIdsFromRoutine(routine, sessionIds);
   } catch {
     // Missing or unreadable file -> empty store.
   }
-  return map;
+  return { routines, sessionIds };
+}
+
+function ensureLoaded(agentDir: string): void {
+  if (globalThis.__ompRoutines && globalThis.__ompRoutinesLoadedFrom === agentDir) return;
+  const { routines, sessionIds } = readStoreFromDisk(agentDir);
+  globalThis.__ompRoutines = routines;
+  globalThis.__ompRoutineSessionIds = sessionIds;
+  globalThis.__ompRoutinesLoadedFrom = agentDir;
 }
 
 function getStore(agentDir: string): Map<string, Routine> {
-  if (!globalThis.__ompRoutines || globalThis.__ompRoutinesLoadedFrom !== agentDir) {
-    globalThis.__ompRoutines = readRoutinesFromDisk(agentDir);
-    globalThis.__ompRoutinesLoadedFrom = agentDir;
-  }
-  return globalThis.__ompRoutines;
+  ensureLoaded(agentDir);
+  return globalThis.__ompRoutines!;
+}
+
+function getSessionIdStore(agentDir: string): Set<string> {
+  ensureLoaded(agentDir);
+  return globalThis.__ompRoutineSessionIds!;
 }
 
 function persist(agentDir: string, store: Map<string, Routine>): void {
   mkdirSync(agentDir, { recursive: true });
   const routines = [...store.values()];
-  writePrivateFileAtomicSync(routinesFilePath(agentDir), `${JSON.stringify({ routines }, null, 2)}\n`);
+  const routineSessionIds = [...getSessionIdStore(agentDir)];
+  writePrivateFileAtomicSync(
+    routinesFilePath(agentDir),
+    `${JSON.stringify({ routines, routineSessionIds }, null, 2)}\n`,
+  );
 }
 
 function resolveAgentDir(agentDir?: string): string {
@@ -448,8 +488,25 @@ export function recordRun(id: string, run: RoutineRun, agentDir?: string): Routi
     history,
   };
   store.set(id, updated);
+  // Track the run's fresh session id so the sidebar can hide it from the normal
+  // session list (persistent + uncapped, unlike `history`).
+  if (run.sessionId) getSessionIdStore(dir).add(run.sessionId);
   persist(dir, store);
   return updated;
+}
+
+/**
+ * Every session id created by a routine RUN (persistent + uncapped). The sidebar
+ * filters these out of the normal session list; the sessions themselves are
+ * still reachable by id via the routine activity view's "Open transcript".
+ */
+export function listRoutineSessionIds(agentDir?: string): string[] {
+  return [...getSessionIdStore(resolveAgentDir(agentDir))];
+}
+
+/** Whether a session id belongs to a routine run (hidden from the session list). */
+export function isRoutineSessionId(sessionId: string, agentDir?: string): boolean {
+  return getSessionIdStore(resolveAgentDir(agentDir)).has(sessionId);
 }
 
 /**
@@ -467,6 +524,8 @@ export function mergeRoutinesIntoStore(incoming: Routine[], agentDir?: string): 
     const existing = store.get(migrated.id);
     if (existing && Date.parse(migrated.updatedAt) <= Date.parse(existing.updatedAt)) continue;
     store.set(migrated.id, migrated);
+    // Adopt any run session ids the incoming routine carries so they stay hidden.
+    sessionIdsFromRoutine(migrated, getSessionIdStore(dir));
     changed += 1;
   }
   if (changed > 0) persist(dir, store);
@@ -476,5 +535,6 @@ export function mergeRoutinesIntoStore(incoming: Routine[], agentDir?: string): 
 /** Test-only: reset the in-memory cache so a test can point at a fresh dir. */
 export function __resetRoutineStoreForTests(): void {
   globalThis.__ompRoutines = undefined;
+  globalThis.__ompRoutineSessionIds = undefined;
   globalThis.__ompRoutinesLoadedFrom = undefined;
 }
